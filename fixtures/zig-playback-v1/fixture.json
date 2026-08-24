@@ -1,0 +1,69 @@
+{
+  "schema": "agentbench/fixture/v1",
+  "id": "zig-playback-v1",
+  "version": "1.0.0",
+  "language": "zig",
+
+  "repo_dir": "repo",
+  "hidden_dir": "hidden",
+  "reference_dir": "reference/tree",
+  "mutants_file": "mutants/mutants.json",
+  "story_file": "public/story.md",
+  "doctrine_file": "repo/AGENTS.md",
+  "agent_contract_file": "public/agent_contract.md",
+  "objective_file": "public/objective.md",
+
+  "owned_files": [
+    "src/voice/cursor.zig",
+    "src/voice/cursor_test.zig",
+    "src/voice/engine.zig",
+    "src/voice/engine_test.zig",
+    "src/voice/range.zig",
+    "src/voice/range_test.zig",
+    "src/voice/root.zig",
+    "src/voice/tone.zig",
+    "src/voice/tone_test.zig"
+  ],
+  "forbidden_paths": [
+    "build.zig",
+    "build.zig.zon",
+    "AGENTS.md",
+    "src/core/**",
+    "products/**",
+    "hidden/**"
+  ],
+
+  "context_packs": {
+    "base": "contexts/base.json"
+  },
+
+  "commands": {
+    "build": ["zig", "build"],
+    "visible": ["zig", "build", "test"],
+    "hidden": ["zig", "build", "test-hidden"],
+    "release": ["zig", "build", "test-release"]
+  },
+
+  "limits": {
+    "builder_max_tokens": 12288,
+    "timeout_seconds": 900,
+    "command_timeout_seconds": 600
+  },
+
+  "required_gates": [
+    "patch_extracted",
+    "patch_applies",
+    "build",
+    "visible_tests",
+    "hidden_tests",
+    "scope",
+    "return_contract"
+  ],
+
+  "unmeasured": [
+    "Reasoning quality. The score is the diff, the gates and the wall clock; prose is not read.",
+    "Whether a per-frame computation was moved into a helper called from the frame loop. The structural control inspects only the first while-loop body inside renderBlock.",
+    "Real-time safety in the sense of measured latency. The doctrine rule is checked as absence of named constructs, not as a timing bound.",
+    "Anything about a second render path. The fixture has one."
+  ]
+}

@@ -1,0 +1,14 @@
+# Reference material supplied for fixture design; not part of the benchmark.
+samples
+
+# Volatile run data. Never embedded into a prompt, never committed.
+runs/
+
+# Zig build artifacts, including those produced inside staged fixture worktrees.
+.zig-cache/
+zig-out/
+
+# Built binaries. Anchored to the repository root: an unanchored "agentbench"
+# would also match cmd/agentbench/, which is the CLI's source.
+/agentbench
+/bin/

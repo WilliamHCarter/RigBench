@@ -1,0 +1,16 @@
+{
+  "schema": "agentbench/layout/v1",
+  "id": "builder-current",
+  "lane": "builder",
+  "description": "The layout an ordinary agent dispatch produces: the task-specific objective leads, and the doctrine, story and source context follow it inside the same user message. Its reusable prefix is empty by construction. Kept so the cache-friendly layout's gain is measured rather than assumed.",
+  "enforce_stability_order": false,
+  "coalesce": "by_role",
+  "blocks": [
+    { "source": "agent_contract", "stability": "stable",   "role": "system" },
+    { "source": "objective",      "stability": "volatile", "role": "user" },
+    { "source": "story",          "stability": "session",  "role": "user" },
+    { "source": "doctrine",       "stability": "stable",   "role": "user" },
+    { "source": "source_context", "stability": "session",  "role": "user" },
+    { "source": "turns",          "stability": "volatile", "role": "user", "optional": true }
+  ]
+}

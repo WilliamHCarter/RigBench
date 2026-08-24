@@ -1,0 +1,14 @@
+{
+  "schema": "agentbench/context/v1",
+  "id": "base",
+  "size_label_verified": false,
+  "notes": "The load-bearing subset: the two modules the seam changes, the consumer whose bytes are frozen, and the core types they are built on. Deliberately not named by a token count -- see the v0.5 context matrix, which owns exact tokenizer counts. Every file here is real fixture source, not filler.",
+  "files": [
+    "src/core/sample.zig",
+    "src/voice/cursor.zig",
+    "src/voice/engine.zig",
+    "src/voice/root.zig",
+    "products/player/player.zig",
+    "products/player/golden.zig"
+  ]
+}

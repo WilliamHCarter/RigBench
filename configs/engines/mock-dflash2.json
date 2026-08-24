@@ -1,0 +1,22 @@
+{
+  "schema": "agentbench/engine/v1",
+  "name": "mock-dflash2",
+  "description": "Deterministic in-repo mock shaped like the measured DFlash2 path (about 105 tok/s decode, tau 6.39, 42.6% acceptance) and exposing Hipfire-style telemetry so the adapter path is exercised. Its timings are a fixture, not a measurement.",
+  "endpoint": "http://127.0.0.1:8099/v1",
+  "model": "mock-qwen3.8-27b-fast",
+  "target_quant": "MQ4R",
+  "kv_mode": "Q8",
+  "speculation_mode": "dflash2",
+  "telemetry_adapter": "hipfire",
+  "headers": {
+    "X-AgentBench-Profile": "dflash2"
+  },
+  "sampling": {
+    "temperature": 0,
+    "max_tokens": 12288,
+    "thinking": "off"
+  },
+  "non_default_knobs": {
+    "draft_precision": "F16"
+  }
+}

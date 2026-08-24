@@ -1,0 +1,19 @@
+{
+  "schema": "agentbench/engine/v1",
+  "name": "mock-ar",
+  "description": "Deterministic in-repo mock shaped like the measured AR path (about 34 tok/s decode, 415 tok/s prefill, 58 ms TTFT). It exists so the harness and the quality gates can be exercised end to end without a rig; its timings are a fixture, not a measurement.",
+  "endpoint": "http://127.0.0.1:8099/v1",
+  "model": "mock-qwen3.8-27b-fast",
+  "target_quant": "MQ4R",
+  "kv_mode": "Q8",
+  "speculation_mode": "off",
+  "telemetry_adapter": "generic",
+  "headers": {
+    "X-AgentBench-Profile": "ar"
+  },
+  "sampling": {
+    "temperature": 0,
+    "max_tokens": 12288,
+    "thinking": "off"
+  }
+}

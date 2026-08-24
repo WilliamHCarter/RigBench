@@ -1,0 +1,17 @@
+{
+  "schema": "agentbench/layout/v1",
+  "id": "builder-cache-friendly",
+  "lane": "builder",
+  "description": "Stable information first, volatile last, each stability class on its own message boundary so the reusable prefix is a real byte prefix. This is the layout the design rule in the benchmark contract asks for.",
+  "enforce_stability_order": true,
+  "coalesce": "by_role_and_stability",
+  "blocks": [
+    { "source": "agent_contract", "stability": "stable",   "role": "system" },
+    { "source": "doctrine",       "stability": "stable",   "role": "system" },
+    { "source": "tool_contracts", "stability": "stable",   "role": "system", "optional": true },
+    { "source": "story",          "stability": "session",  "role": "user" },
+    { "source": "source_context", "stability": "session",  "role": "user" },
+    { "source": "objective",      "stability": "volatile", "role": "user" },
+    { "source": "turns",          "stability": "volatile", "role": "user", "optional": true }
+  ]
+}

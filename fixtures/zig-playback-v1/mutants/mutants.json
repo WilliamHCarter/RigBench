@@ -1,0 +1,250 @@
+{
+  "schema": "agentbench/mutants/v1",
+  "fixture": "zig-playback-v1",
+  "applies_to": "reference",
+  "note": "Each mutant is applied to the reference solution, not to HEAD. A mutant is a control on the hidden suite: if the hidden suite stays green under any of these, the hidden suite is vacuous for that invariant and the fixture is broken. `expect.visible` records what the visible suite does, which is how the fixture shows what the hidden suite is *for*.",
+  "mutants": [
+    {
+      "id": "m01-range-end-inclusive",
+      "lens": "correctness",
+      "description": "The upper bound is treated as inclusive, so forward playback reads range.end.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/cursor.zig",
+          "find": "if (next_frame < range.start or next_frame >= range.end) return error.Exhausted;",
+          "replace": "if (next_frame < range.start or next_frame > range.end) return error.Exhausted;"
+        }
+      ]
+    },
+    {
+      "id": "m02-mutate-before-legality",
+      "lens": "correctness/adversarial",
+      "description": "Cursor state is committed before the legality check, so a refused advance still moves the position.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/cursor.zig",
+          "find": "        if (next_frame < range.start or next_frame >= range.end) return error.Exhausted;\n\n        self.frame = next_frame;\n        self.phase = next_phase;",
+          "replace": "        self.frame = next_frame;\n        self.phase = next_phase;\n\n        if (next_frame < range.start or next_frame >= range.end) return error.Exhausted;"
+        }
+      ]
+    },
+    {
+      "id": "m03-tone-in-hot",
+      "lens": "consistency/system-design",
+      "description": "Tone is stored in the audio-plane record, growing Hot past 72 bytes; the builder's own layout tests were updated to match.",
+      "expect": {
+        "build": "ok",
+        "visible": "pass",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": "    handle: u32, // 68 .. 72\n};",
+          "replace": "    handle: u32, // 68 .. 72\n    tone_gain: f32, // 72 .. 76\n    tone_coeff: f32, // 76 .. 80\n};"
+        },
+        {
+          "file": "src/voice/engine.zig",
+          "find": "pub const hot_size: usize = 72;",
+          "replace": "pub const hot_size: usize = 80;"
+        },
+        {
+          "file": "src/voice/engine.zig",
+          "find": "                .flags = 0,\n                .handle = 0,",
+          "replace": "                .flags = 0,\n                .handle = 0,\n                .tone_gain = 0,\n                .tone_coeff = 0,"
+        },
+        {
+          "file": "src/voice/engine.zig",
+          "find": "            .flags = flag_active,\n            .handle = handle,",
+          "replace": "            .flags = flag_active,\n            .handle = handle,\n            .tone_gain = cold.tone.gain,\n            .tone_coeff = coeff,"
+        },
+        {
+          "file": "src/voice/engine_test.zig",
+          "find": "test \"Hot is exactly 72 bytes\" {\n    try std.testing.expectEqual(@as(usize, 72), @sizeOf(Hot));\n    try std.testing.expectEqual(@as(usize, 72), engine.hot_size);",
+          "replace": "test \"Hot is exactly 72 bytes\" {\n    try std.testing.expectEqual(@as(usize, 80), @sizeOf(Hot));\n    try std.testing.expectEqual(@as(usize, 80), engine.hot_size);"
+        },
+        {
+          "file": "src/voice/engine_test.zig",
+          "find": "test \"the seam did not grow Hot\" {\n    try std.testing.expectEqual(@as(usize, 72), @sizeOf(Hot));",
+          "replace": "test \"the seam did not grow Hot\" {\n    try std.testing.expectEqual(@as(usize, 80), @sizeOf(Hot));"
+        }
+      ],
+      "note": "Visible suite stays green because the patch edits its own layout expectations. Only the hidden frozen-field-set control catches it."
+    },
+    {
+      "id": "m04-coefficient-inside-frame-loop",
+      "lens": "performance",
+      "description": "The filter coefficient is resolved from cold state once per frame instead of once at note-on. Bit-identical output.",
+      "expect": {
+        "build": "ok",
+        "visible": "pass",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": "        const range = rangeOf(&self.cold, s) catch unreachable;\n        const coeff = self.hot.filter_coeff;",
+          "replace": "        const range = rangeOf(&self.cold, s) catch unreachable;"
+        },
+        {
+          "file": "src/voice/engine.zig",
+          "find": "            const t = self.hot.cursor.taps(range);",
+          "replace": "            const coeff = self.cold.tone.resolveCoeff(self.cold.segment.filter_coeff) catch unreachable;\n            const t = self.hot.cursor.taps(range);"
+        }
+      ],
+      "note": "Produces byte-identical audio. Invisible to every behavioural test; only the structural control sees it."
+    },
+    {
+      "id": "m05-reverse-below-start",
+      "lens": "adversarial",
+      "description": "The lower-bound check is dropped, so reverse playback steps below range.start.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/cursor.zig",
+          "find": "if (next_frame < range.start or next_frame >= range.end) return error.Exhausted;",
+          "replace": "if (next_frame >= range.end) return error.Exhausted;"
+        }
+      ]
+    },
+    {
+      "id": "m06-permissive-coefficient",
+      "lens": "completeness/correctness",
+      "description": "Coefficient validation is written permissively for non-finite input, so NaN, infinity and any coefficient at or above 1.0 are accepted and reach the frame loop.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/tone.zig",
+          "find": "return std.math.isFinite(c) and c >= 0.0 and c < 1.0;",
+          "replace": "return c >= 0.0 or !std.math.isFinite(c);"
+        }
+      ]
+    },
+    {
+      "id": "m07-default-path-moves-player-bytes",
+      "lens": "consistency",
+      "description": "Tone gain replaces the base gain instead of multiplying it, so the default Player path changes.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": ".voice_gain = cold.base_gain * cold.tone.gain,",
+          "replace": ".voice_gain = cold.tone.gain,"
+        }
+      ]
+    },
+    {
+      "id": "m08-invalid-range-clamped",
+      "lens": "correctness",
+      "description": "An invalid range is silently widened to the full sample instead of refused by name.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": "if (!range.validate(s.frames)) return error.InvalidRange;",
+          "replace": "if (!range.validate(s.frames)) return FrameRange.full(s.frames);"
+        }
+      ]
+    },
+    {
+      "id": "m09-bypass-inherits",
+      "lens": "correctness",
+      "description": "Explicit bypass inherits the segment coefficient instead of resolving to exactly zero.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/tone.zig",
+          "find": ".bypass => 0.0,",
+          "replace": ".bypass => segment_coeff,"
+        }
+      ]
+    },
+    {
+      "id": "m10-explicit-coefficient-ignored",
+      "lens": "correctness",
+      "description": "An explicit coefficient is validated and then discarded in favour of the segment's.",
+      "expect": {
+        "build": "ok",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/tone.zig",
+          "find": ".coefficient => |c| if (coeffIsUsable(c)) c else error.BadCoefficient,",
+          "replace": ".coefficient => |c| if (coeffIsUsable(c)) segment_coeff else error.BadCoefficient,"
+        }
+      ]
+    },
+    {
+      "id": "m11-cold-retains-pointer",
+      "lens": "system-design",
+      "description": "Cold retains a borrowed segment pointer; the visible comptime guard that would have caught it was deleted.",
+      "expect": {
+        "build": "ok",
+        "visible": "pass",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": "    tone: Tone = .{},\n};",
+          "replace": "    tone: Tone = .{},\n    borrowed: ?*const Segment = null,\n};"
+        },
+        {
+          "file": "src/voice/engine_test.zig",
+          "find": "test \"a voice retains no pointer\" {\n    inline for (@typeInfo(Cold).@\"struct\".fields) |f| {\n        if (@typeInfo(f.type) == .pointer) {\n            @compileError(\"Cold.\" ++ f.name ++ \" is a pointer; a voice must retain none\");\n        }\n    }\n}\n\n",
+          "replace": ""
+        }
+      ],
+      "note": "Deleting the builder's own comptime guard makes the visible suite green. The hidden recursive reflection check still refuses it."
+    },
+    {
+      "id": "control-syntax-error",
+      "lens": "control",
+      "description": "Deliberate syntax error. Not a defect model: a control proving a red rung is reachable at all, and that a build failure is not silently scored as a pass.",
+      "expect": {
+        "build": "fail",
+        "visible": "fail",
+        "hidden": "fail"
+      },
+      "edits": [
+        {
+          "file": "src/voice/engine.zig",
+          "find": "pub const flag_active: u32 = 1 << 0;",
+          "replace": "pub const flag_active: u32 = 1 << ;"
+        }
+      ]
+    }
+  ]
+}
