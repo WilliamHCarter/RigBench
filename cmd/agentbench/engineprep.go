@@ -50,7 +50,7 @@ type engineAttestation struct {
 }
 
 // prepareEngine runs the preparation hook and the identity probe for one engine.
-func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir string,
+func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir, suffix string,
 	timeout time.Duration) (*engineAttestation, error) {
 
 	att := &engineAttestation{Recorded: map[string]string{}}
@@ -65,12 +65,12 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 			return nil, err
 		}
 		r := executor.Run(ctx, ".", []string{abs, e.Name}, timeout)
-		logPath := filepath.Join(dir, e.Name+".prepare.log")
+		logPath := filepath.Join(dir, e.Name+suffix+".prepare.log")
 		body := fmt.Sprintf("$ %s %s\nexit %d  duration %s  timed_out=%v unavailable=%v\n\n%s\n",
 			abs, e.Name, r.ExitCode, r.Duration.Round(time.Millisecond),
 			r.TimedOut, r.Unavailable, r.Combined())
 		_ = os.WriteFile(logPath, []byte(body), 0o644)
-		att.PreparedLog = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+".prepare.log"))
+		att.PreparedLog = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+suffix+".prepare.log"))
 		if !r.OK() {
 			return nil, fmt.Errorf("preparation hook failed for %s (exit %d): %s\nsee %s",
 				e.Name, r.ExitCode, firstLineOf(r.Combined()), logPath)
@@ -83,9 +83,9 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 		if err != nil {
 			return nil, fmt.Errorf("identity probe for %s: %w", e.Name, err)
 		}
-		probePath := filepath.Join(dir, e.Name+".probe.json")
+		probePath := filepath.Join(dir, e.Name+suffix+".probe.json")
 		_ = os.WriteFile(probePath, raw, 0o644)
-		att.ProbeArtifact = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+".probe.json"))
+		att.ProbeArtifact = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+suffix+".probe.json"))
 
 		var doc any
 		if err := json.Unmarshal(raw, &doc); err != nil {

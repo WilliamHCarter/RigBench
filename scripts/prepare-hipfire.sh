@@ -125,4 +125,4 @@ wait_ready
 # Evidence. The run keeps this output, so a row labelled 'ar' can be checked
 # against what the daemon actually reported at the moment it was prepared.
 log "resulting configuration:"
-hipfire config "$MODEL" show || log "(hipfire config show unavailable)"
+hipfire config "$MODEL" list || log "(hipfire config list unavailable)"

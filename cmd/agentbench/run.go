@@ -115,6 +115,15 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		return "", fmt.Errorf("a cold run cannot be preceded by %d warmup request(s); "+
 			"declare -thermal steady, or drop -warmup", rf.warmup)
 	}
+	// A repeated cold measurement is only cold if something returns the server
+	// to a cold state between repeats. Without that, repeats 2..N are warm rows
+	// wearing a cold label -- which is the failure this whole harness exists to
+	// prevent, so it is refused rather than warned about.
+	if rf.thermal == "cold" && rf.repeats > 1 && rf.beforeEngine == "" && rf.preEngine == nil {
+		return "", fmt.Errorf("-thermal cold with -repeats %d needs a way to return the "+
+			"server to a cold state between repetitions. Pass -before-engine, or use "+
+			"-repeats 1, or declare -thermal steady with -warmup 1", rf.repeats)
+	}
 
 	var traj *config.Trajectory
 	if rf.turns {
@@ -227,67 +236,95 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	// for byte. Checked, because that is the whole basis of the comparison.
 	promptHashes := map[string][]string{}
 
-	for rep := 0; rep < rf.repeats; rep++ {
-		for _, e := range engines {
-			label := e.Name
-			if rf.repeats > 1 {
-				label = fmt.Sprintf("%s rep %d", e.Name, rep+1)
-			}
-			fmt.Printf("-> %s (%s, %s, %s)\n", label, layout.ID, rf.contextPack, rf.thermal)
+	// Engine outer, repetition inner. See schedule.go: with the loops the other
+	// way round, preparing engine B leaves the server in B's state and every
+	// later repetition labelled A is measured against B.
+	//
+	// A cold measurement is only cold if the server was actually returned to a
+	// cold state, so repeated cold measurements are prepared individually and
+	// are never warmed.
+	preparePerRep := rf.thermal == "cold" && rf.repeats > 1
+	steps := schedule(scheduleParams{
+		Engines: len(engines), Repeats: rf.repeats, Warmups: rf.warmup,
+		PreparePerRepetition: preparePerRep,
+	})
+	// Belt and braces: the topology is asserted, not trusted. This is the exact
+	// invariant a plausible-looking loop rewrite breaks, and breaking it
+	// produces mislabelled rows rather than an error.
+	if err := checkSchedule(steps); err != nil {
+		return "", fmt.Errorf("internal: bad run schedule: %w", err)
+	}
 
+	optsFor := func(e *config.Engine) runner.Options {
+		return runner.Options{
+			Fixture: f, Engine: e, Layout: layout,
+			ContextPack: rf.contextPack, Thermal: rf.thermal,
+			RunID: runID, RunDir: runDir, WorkDir: workDir,
+			Tokenizer: tok, EndpointOverride: rf.endpoint,
+			Trajectory: traj,
+		}
+	}
+
+	for _, st := range steps {
+		e := engines[st.Engine]
+
+		switch st.Kind {
+		case stepPrepare:
 			if rf.preEngine != nil {
 				if err := rf.preEngine(e.Name); err != nil {
 					return "", fmt.Errorf("engine %s: preparing a %s start: %w",
 						e.Name, rf.thermal, err)
 				}
 			}
-
-			// Produce and check the engine state this row will be labelled with,
-			// before anything is measured. Done once per engine rather than per
-			// repetition: a hook that restarts a server would otherwise turn
-			// every steady-state repeat back into a cold one.
-			if rep == 0 && (rf.beforeEngine != "" || e.IdentityProbe != nil) {
-				ep := e.Endpoint
-				if rf.endpoint != "" {
-					ep = rf.endpoint
-				}
-				att, err := prepareEngine(ctx, e, rf.beforeEngine, ep, runDir, f.CommandTimeout())
-				if err != nil {
-					return "", err
-				}
-				applyAttestation(engineIdentity[e.Name], att)
-				fmt.Printf("   identity: %s\n", att.Method)
-				for i := range run.Engines {
-					if run.Engines[i].Name == e.Name {
-						run.Engines[i] = *engineIdentity[e.Name]
-					}
-				}
-				if err := run.Save(filepath.Join(runDir, "run.json")); err != nil {
-					return "", err
+			if rf.beforeEngine == "" && e.IdentityProbe == nil {
+				continue
+			}
+			ep := e.Endpoint
+			if rf.endpoint != "" {
+				ep = rf.endpoint
+			}
+			suffix := ""
+			if preparePerRep {
+				suffix = fmt.Sprintf(".rep%d", st.PrepareOrdinal+1)
+			}
+			fmt.Printf("-> preparing %s%s\n", e.Name, suffix)
+			att, err := prepareEngine(ctx, e, rf.beforeEngine, ep, runDir, suffix, f.CommandTimeout())
+			if err != nil {
+				return "", err
+			}
+			applyAttestation(engineIdentity[e.Name], att)
+			fmt.Printf("   identity: %s\n", att.Method)
+			for i := range run.Engines {
+				if run.Engines[i].Name == e.Name {
+					run.Engines[i] = *engineIdentity[e.Name]
 				}
 			}
-
-			opts := runner.Options{
-				Fixture: f, Engine: e, Layout: layout,
-				ContextPack: rf.contextPack, Thermal: rf.thermal,
-				RunID: runID, RunDir: runDir, WorkDir: workDir,
-				Tokenizer: tok, EndpointOverride: rf.endpoint,
-				Trajectory: traj,
+			if err := run.Save(filepath.Join(runDir, "run.json")); err != nil {
+				return "", err
 			}
 
+		case stepWarmup:
 			// The resident-server warm protocol: send and discard priming
-			// requests, then measure. The discarded requests are not recorded,
-			// but that they happened is, in run.json's warmup policy.
-			for i := 0; i < rf.warmup; i++ {
-				fmt.Printf("   warmup %d/%d (discarded)\n", i+1, rf.warmup)
-				if _, err := runner.RunTurn(ctx, opts, runner.TurnOptions{
-					Index: 0, Score: false, TurnCount: 1,
-					Thermal: "warmup-discarded",
-				}); err != nil {
-					return "", fmt.Errorf("engine %s warmup: %w", e.Name, err)
-				}
+			// requests, then measure. Once per engine, not once per
+			// repetition -- priming immediately before every measurement would
+			// measure an identical request replayed against a fully populated
+			// prefix cache rather than a resident engine.
+			fmt.Printf("   warmup for %s (discarded)\n", e.Name)
+			if _, err := runner.RunTurn(ctx, optsFor(e), runner.TurnOptions{
+				Index: 0, Score: false, TurnCount: 1,
+				Thermal: "warmup-discarded",
+			}); err != nil {
+				return "", fmt.Errorf("engine %s warmup: %w", e.Name, err)
 			}
 
+		case stepMeasure:
+			label := e.Name
+			if rf.repeats > 1 {
+				label = fmt.Sprintf("%s rep %d/%d", e.Name, st.Rep+1, rf.repeats)
+			}
+			fmt.Printf("-> %s (%s, %s, %s)\n", label, layout.ID, rf.contextPack, rf.thermal)
+
+			opts := optsFor(e)
 			var results []*runner.Result
 			if traj != nil {
 				results, err = runner.RunTrajectory(ctx, opts)
@@ -304,6 +341,7 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 
 			for _, res := range results {
 				r := res.Record
+				r.Repetition = st.Rep
 				promptHashes[r.PromptSHA256] = append(promptHashes[r.PromptSHA256],
 					fmt.Sprintf("%s t%d", e.Name, r.TurnIndex))
 				if err := w.Write(r); err != nil {
@@ -413,10 +451,22 @@ func printTurn(r *metrics.Record, multiTurn bool) {
 func warmupPolicy(rf *runFlags, traj *config.Trajectory) string {
 	var parts []string
 	if rf.warmup > 0 {
-		parts = append(parts, fmt.Sprintf("%d discarded priming request(s) before the first measured turn",
-			rf.warmup))
+		parts = append(parts, fmt.Sprintf(
+			"%d discarded priming request(s) per engine, sent once after that engine was "+
+				"prepared and before its first measured repetition -- not before each "+
+				"repetition, which would measure an identical request replayed against a "+
+				"fully populated prefix cache", rf.warmup))
 	} else {
 		parts = append(parts, "no priming requests")
+	}
+	if rf.thermal == "cold" && rf.repeats > 1 {
+		parts = append(parts, fmt.Sprintf(
+			"each of the %d cold repetitions was preceded by its own engine preparation",
+			rf.repeats))
+	} else if rf.repeats > 1 {
+		parts = append(parts, fmt.Sprintf(
+			"each engine was prepared once, then measured %d times in a row; engines are "+
+				"never interleaved across repetitions", rf.repeats))
 	}
 	if traj != nil {
 		parts = append(parts, fmt.Sprintf(

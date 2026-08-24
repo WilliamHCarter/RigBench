@@ -16,6 +16,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.1 — single-call runner + cold builder fixture | complete, acceptance gate green |
 | v0.2 — multi-turn builder replay + prefix layout | complete, acceptance gate green |
 | v0.2.1 — review fixes: executable engine identity | complete |
+| v0.2.2 — review fixes: run schedule topology | complete |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -103,6 +104,10 @@ runs/<run-id>/               volatile output; never embedded into a prompt
 - **`thinking: off` must say how.** Omitting a reasoning field does not disable
   reasoning, so a config claiming no-think has to name the mechanism, and the
   acceptance gate checks the sent bytes against a negative control.
+- **Engines are never interleaved across repetitions.** Preparation is engine
+  outer, repetition inner, and warmup is once per engine — otherwise a
+  `-repeats 3` A/B measures the later repeats against whichever engine was
+  prepared last. The schedule is asserted before the first request is sent.
 - **A replay turn carries no verdict.** A four-turn replay judges its scored turn
   and records the rest as context-growth measurements. They are never counted as
   failures.
@@ -139,7 +144,7 @@ story could reuse from the first:
 | `builder-current` | 1,552 B | 4% | 1,536 B (6%) |
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
-[docs/v0.2.1.md](docs/v0.2.1.md).
+[docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md).
 
 ## Toolchain
 

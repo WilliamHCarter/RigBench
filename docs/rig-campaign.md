@@ -66,6 +66,17 @@ One discarded warmup, three repetitions. This is the clean equivalent of the
 33.96 vs 105.08 tok/s microbench, but now with a real builder patch and the
 hidden-test quality gate attached.
 
+The runner schedules this as **engine outer, repetition inner**:
+
+```
+prepare AR       warm AR once     AR rep 1   AR rep 2   AR rep 3
+prepare DFlash   warm DFlash once DFlash rep 1  DFlash rep 2  DFlash rep 3
+```
+
+Engines are never interleaved across repetitions, and the warmup is one per
+engine rather than one per measurement. Both properties are asserted before the
+first request is sent, and pinned by tests in `cmd/agentbench/schedule_test.go`.
+
 ```bash
 go run ./cmd/agentbench run -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -warmup 1 -repeats 3
 ```
@@ -116,6 +127,9 @@ probe response shows what the daemon reported at the moment it was prepared.
    is not a champion.
 2. **§4 engine identity.** Any row marked **asserted** rather than attested was
    labelled from a config file. Stop there and fix the hook before reading on.
+   Then check `run.json`'s `warmup_policy`: it states how many priming requests
+   were sent and whether engines were interleaved, so the schedule that produced
+   the rows is recorded and not something you have to remember.
 3. **§2 wall clock**, cold and warm never averaged together.
 4. **§3 telemetry.** `not exposed` is not zero. If the Hipfire columns are all
    `not exposed`, the adapter's provisional key names are wrong — the fix is in

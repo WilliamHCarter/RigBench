@@ -134,6 +134,10 @@ type Record struct {
 	AppendedBytes int `json:"appended_bytes"`
 	// TurnCount is the length of the trajectory this row belongs to.
 	TurnCount int `json:"turn_count"`
+	// Repetition is which steady-state repeat this row came from, 0-based.
+	// Recorded so a cell's dispersion can be traced back to individual repeats,
+	// and so a repeat that drifted can be found rather than averaged away.
+	Repetition int `json:"repetition"`
 	// TokenizerID names what produced PromptTokensEstimated. It is not the
 	// target tokenizer until the v0.5 verifier lands, and a context variant is
 	// never labelled from this number.
