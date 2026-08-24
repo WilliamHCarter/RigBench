@@ -94,7 +94,7 @@ pub fn referenceDigest() RenderError![32]u8 {
 pub fn digestHex() RenderError![64]u8 {
     const d = try referenceDigest();
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{&d}) catch unreachable;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{std.fmt.fmtSliceHexLower(&d)}) catch unreachable;
     return hex;
 }
 
