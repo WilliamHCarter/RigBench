@@ -211,3 +211,212 @@ func TestApproxTokenizerIsDeterministicAndNotClaimedExact(t *testing.T) {
 		t.Fatal("counted nothing")
 	}
 }
+
+// --- multi-turn tail -----------------------------------------------------
+
+// friendlySpec mirrors configs/layouts/builder-cache-friendly.json: stable
+// first, and a message boundary at every stability change.
+func friendlySpec() LayoutSpec {
+	return LayoutSpec{
+		ID: "cache-friendly", EnforceStabilityOrder: true, Coalesce: ByRoleAndStability,
+		Blocks: []SlotSpec{
+			{Source: SlotAgentContract, Stability: Stable, Role: System},
+			{Source: SlotStory, Stability: Session, Role: User},
+			{Source: SlotObjective, Stability: Volatile, Role: User},
+			{Source: SlotTurns, Stability: Volatile, Role: User, Optional: true},
+		},
+	}
+}
+
+// currentSpec mirrors configs/layouts/builder-current.json: the volatile
+// objective leads and everything else follows it inside one user message.
+func currentSpec() LayoutSpec {
+	return LayoutSpec{
+		ID: "current", Coalesce: ByRole,
+		Blocks: []SlotSpec{
+			{Source: SlotAgentContract, Stability: Stable, Role: System},
+			{Source: SlotObjective, Stability: Volatile, Role: User},
+			{Source: SlotStory, Stability: Session, Role: User},
+			{Source: SlotTurns, Stability: Volatile, Role: User, Optional: true},
+		},
+	}
+}
+
+var srcs = Sources{
+	SlotAgentContract: "contract",
+	SlotStory:         "story",
+	SlotObjective:     "objective 0",
+}
+
+func tailTo(turn int) []TailBlock {
+	var out []TailBlock
+	for i := 0; i < turn; i++ {
+		out = append(out,
+			TailBlock{ID: "a", Role: Assistant, Text: "assistant " + string(rune('0'+i))},
+			TailBlock{ID: "r", Role: User, Text: "TEST_RESULT " + string(rune('0'+i))},
+			TailBlock{ID: "o", Role: User, Text: "objective " + string(rune('1'+i))},
+		)
+	}
+	return out
+}
+
+func buildTurn(t *testing.T, sp LayoutSpec, turn int) *Manifest {
+	t.Helper()
+	blocks, err := Resolve(sp, srcs, tailTo(turn), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Build(blocks, BuildOptions{
+		Layout: sp.ID, EnforceStabilityOrder: sp.EnforceStabilityOrder,
+		Coalesce: sp.Coalesce, Tokenizer: tok,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// The v0.2 acceptance property, at the unit level: every turn is a byte-exact
+// append of the one before it, under both coalescing modes.
+func TestEveryTurnIsAnAppendOfThePrevious(t *testing.T) {
+	for _, sp := range []LayoutSpec{friendlySpec(), currentSpec()} {
+		var prev *Manifest
+		for turn := 0; turn < 4; turn++ {
+			m := buildTurn(t, sp, turn)
+			if err := m.AppendsOnto(prev); err != nil {
+				t.Fatalf("layout %s turn %d: %v", sp.ID, turn, err)
+			}
+			if prev != nil && m.PromptBytes <= prev.PromptBytes {
+				t.Fatalf("layout %s turn %d did not grow", sp.ID, turn)
+			}
+			prev = m
+		}
+	}
+}
+
+// Pairing a stable-first ordering with by-role coalescing merges the volatile
+// tail into the stable body, silently destroying the property being measured.
+// That combination must be refused, not quietly reported as a zero.
+func TestStableFirstOrderingWithByRoleCoalescingIsRefused(t *testing.T) {
+	sp := friendlySpec()
+	sp.Coalesce = ByRole
+	blocks, err := Resolve(sp, srcs, tailTo(1), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Build(blocks, BuildOptions{Layout: sp.ID, Coalesce: ByRole, Tokenizer: tok})
+	if err == nil {
+		t.Fatal("an invalid ordering/coalescing pair was accepted")
+	}
+	if !strings.Contains(err.Error(), "not a byte prefix") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+}
+
+// The layouts differ in cross-task reuse, not in turn-to-turn reuse: within one
+// story a volatile-first layout still appends cleanly, because its leading
+// objective does not change between turns. Pinned so the A/B is not read as
+// claiming more than it shows.
+func TestCurrentLayoutStillAppendsWithinAStory(t *testing.T) {
+	a := buildTurn(t, currentSpec(), 1)
+	b := buildTurn(t, currentSpec(), 2)
+	if err := b.AppendsOnto(a); err != nil {
+		t.Fatalf("the current layout failed to append within one story: %v", err)
+	}
+	// And yet its reusable prefix is far smaller than the cache-friendly one's.
+	friendly := buildTurn(t, friendlySpec(), 2)
+	if b.StablePrefixBytes >= friendly.StablePrefixBytes {
+		t.Fatalf("current layout prefix %d is not smaller than cache-friendly %d",
+			b.StablePrefixBytes, friendly.StablePrefixBytes)
+	}
+}
+
+// The tail keeps each message's own role: a replayed assistant turn must not be
+// flattened into the user's message, or the model sees a transcript in which it
+// never spoke.
+func TestTailPreservesAssistantTurns(t *testing.T) {
+	m := buildTurn(t, friendlySpec(), 2)
+	var roles []Role
+	for _, msg := range m.Messages {
+		roles = append(roles, msg.Role)
+	}
+	assistants := 0
+	for _, r := range roles {
+		if r == Assistant {
+			assistants++
+		}
+	}
+	if assistants != 2 {
+		t.Fatalf("want 2 assistant messages, got %d in %v", assistants, roles)
+	}
+}
+
+// A "turns" slot the layout marked optional must be allowed to be empty on
+// turn 0, and a required slot must not.
+func TestOptionalTurnsSlotIsEmptyOnTurnZero(t *testing.T) {
+	m := buildTurn(t, friendlySpec(), 0)
+	if len(m.Blocks) != 3 {
+		t.Fatalf("want three blocks on turn 0, got %d", len(m.Blocks))
+	}
+}
+
+func TestSameContentAcceptsAReorderAndRejectsAReword(t *testing.T) {
+	friendly := buildTurn(t, friendlySpec(), 2)
+
+	// Same bytes, different order and message boundaries.
+	reordered := LayoutSpec{
+		ID: "current", Coalesce: ByRole,
+		Blocks: []SlotSpec{
+			{Source: SlotObjective, Stability: Volatile, Role: User},
+			{Source: SlotStory, Stability: Session, Role: User},
+			{Source: SlotAgentContract, Stability: Stable, Role: System},
+			{Source: SlotTurns, Stability: Volatile, Role: User, Optional: true},
+		},
+	}
+	blocks, err := Resolve(reordered, srcs, tailTo(2), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := Build(blocks, BuildOptions{Layout: "current", Coalesce: ByRole, Tokenizer: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SameContent(friendly, other); err != nil {
+		t.Fatalf("a pure reorder was rejected: %v", err)
+	}
+
+	// One reworded block must be caught, or a layout A/B could smuggle in a
+	// prompt change and call the result a layout effect.
+	reworded := Sources{
+		SlotAgentContract: "contract",
+		SlotStory:         "story, but reworded",
+		SlotObjective:     "objective 0",
+	}
+	b2, err := Resolve(friendlySpec(), reworded, tailTo(2), tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := Build(b2, BuildOptions{Layout: "reworded", Coalesce: ByRoleAndStability, Tokenizer: tok})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SameContent(friendly, m2); err == nil {
+		t.Fatal("a reworded block passed as the same content")
+	}
+}
+
+// The stable prefix must not move as turns are appended: that is the span a
+// served cache reuses, and a layout whose head drifted per turn would reuse
+// nothing however stable its content looked.
+func TestStablePrefixIsConstantAcrossTurns(t *testing.T) {
+	first := buildTurn(t, friendlySpec(), 0)
+	for turn := 1; turn < 4; turn++ {
+		m := buildTurn(t, friendlySpec(), turn)
+		if m.StablePrefixSHA256 != first.StablePrefixSHA256 {
+			t.Fatalf("turn %d moved the stable prefix", turn)
+		}
+		if m.StablePrefixBytes != first.StablePrefixBytes {
+			t.Fatalf("turn %d changed the stable prefix length", turn)
+		}
+	}
+}

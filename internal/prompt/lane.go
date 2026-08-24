@@ -74,16 +74,36 @@ func ParseRole(s string) (Role, error) {
 	return "", fmt.Errorf("unknown role %q", s)
 }
 
+// TailBlock is one message in the volatile multi-turn tail.
+//
+// The tail is a sequence rather than a single slot because a builder loop
+// alternates roles: the model's turn, then the tool or test result, then the
+// next objective. A layout names *where* the tail goes with a `turns` slot; the
+// caller supplies what is in it.
+type TailBlock struct {
+	ID   string
+	Role Role
+	Text string
+}
+
 // Resolve turns a layout plus sources into blocks, ready for Build.
 //
 // A non-optional slot that resolves to nothing is an error rather than an empty
 // block: a prompt missing its story would still hash, still stream, and still
 // produce a plausible-looking failure.
-func Resolve(spec LayoutSpec, src Sources, tok Tokenizer) ([]Block, error) {
+func Resolve(spec LayoutSpec, src Sources, tail []TailBlock, tok Tokenizer) ([]Block, error) {
 	var blocks []Block
 	for i, slot := range spec.Blocks {
 		if !knownSlots[slot.Source] {
 			return nil, fmt.Errorf("layout %s block %d: unknown source %q", spec.ID, i, slot.Source)
+		}
+		// The tail expands in place, keeping each message's own role. It is
+		// always volatile: every byte of it changes as the loop proceeds.
+		if slot.Source == SlotTurns {
+			for _, tb := range tail {
+				blocks = append(blocks, NewBlock(tb.ID, Volatile, tb.Role, tb.Text, tok))
+			}
+			continue
 		}
 		text, ok := src[slot.Source]
 		if !ok || strings.TrimSpace(text) == "" {
@@ -98,6 +118,54 @@ func Resolve(spec LayoutSpec, src Sources, tok Tokenizer) ([]Block, error) {
 		return nil, fmt.Errorf("layout %s resolved to no blocks", spec.ID)
 	}
 	return blocks, nil
+}
+
+// SameContent reports whether two manifests carry the same block contents, in
+// any order and under any message boundaries.
+//
+// This is what makes a layout A/B honest. A "cache-friendly" layout that also
+// quietly reworded the story would show a gain that had nothing to do with
+// layout, so the acceptance gate asserts the two layouts are a pure reordering
+// of identical bytes.
+func SameContent(a, b *Manifest) error {
+	count := func(m *Manifest) map[string]int {
+		out := map[string]int{}
+		for _, blk := range m.Blocks {
+			out[blk.SHA256]++
+		}
+		return out
+	}
+	ca, cb := count(a), count(b)
+	var missing, extra []string
+	for h, n := range ca {
+		if cb[h] != n {
+			missing = append(missing, blockLabel(a, h))
+		}
+	}
+	for h, n := range cb {
+		if ca[h] != n {
+			extra = append(extra, blockLabel(b, h))
+		}
+	}
+	if len(missing) == 0 && len(extra) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	return fmt.Errorf("layouts %q and %q do not carry the same bytes: "+
+		"only in %s: [%s]; only in %s: [%s]",
+		a.Layout, b.Layout,
+		a.Layout, strings.Join(missing, ", "),
+		b.Layout, strings.Join(extra, ", "))
+}
+
+func blockLabel(m *Manifest, sha string) string {
+	for _, blk := range m.Blocks {
+		if blk.SHA256 == sha {
+			return fmt.Sprintf("%s(%s)", blk.ID, sha[:8])
+		}
+	}
+	return sha[:8]
 }
 
 // SlotNames lists the slots a layout consumes, sorted. Used by the runner to

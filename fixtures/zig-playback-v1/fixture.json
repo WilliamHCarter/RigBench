@@ -12,6 +12,7 @@
   "doctrine_file": "repo/AGENTS.md",
   "agent_contract_file": "public/agent_contract.md",
   "objective_file": "public/objective.md",
+  "trajectory_file": "trajectories/builder-4turn.json",
 
   "owned_files": [
     "src/voice/cursor.zig",

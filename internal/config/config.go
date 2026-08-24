@@ -34,6 +34,7 @@ type Fixture struct {
 	DoctrineFile      string `json:"doctrine_file"`
 	AgentContractFile string `json:"agent_contract_file"`
 	ObjectiveFile     string `json:"objective_file"`
+	TrajectoryFile    string `json:"trajectory_file"`
 
 	// Ownership. OwnedFiles is the allowlist a candidate patch may touch;
 	// ForbiddenPaths is called out separately so a scope violation can name the
@@ -147,6 +148,75 @@ func (f *Fixture) LoadContextPack(name string) (*ContextPack, error) {
 	}
 	sort.Strings(p.Files)
 	return &p, nil
+}
+
+// --- trajectory ----------------------------------------------------------
+
+// Trajectory is a deterministic multi-turn replay.
+//
+// The assistant messages and tool results here are fixture bytes and are
+// appended regardless of what the model under test actually said. That is not a
+// shortcut: it is the only way turn N's prompt can be a byte-exact prefix of
+// turn N+1's, which is the property that makes prefix-reuse telemetry
+// interpretable. v0.4 replaces the replay with a live edit/test loop, and that
+// is a different lane with a different determinism story.
+type Trajectory struct {
+	Schema string `json:"schema"`
+	ID     string `json:"id"`
+	Lane   string `json:"lane"`
+	Note   string `json:"note"`
+	// ResultProvenance records where the replayed tool output came from. A
+	// fabricated TEST_RESULT would make the context realistic-looking and the
+	// benchmark dishonest, so the fixture says which real run produced each.
+	ResultProvenance string `json:"result_provenance"`
+	// ScoredTurn is the turn whose model output goes through the builder gates.
+	// Earlier turns are context-growth measurements and carry no quality verdict.
+	ScoredTurn int    `json:"scored_turn"`
+	Turns      []Turn `json:"turns"`
+}
+
+type Turn struct {
+	Index     int    `json:"index"`
+	Objective string `json:"objective"`
+	// ReplayAssistant and ReplayResult are appended to the volatile tail after
+	// this turn. Empty on the final turn, which has no successor.
+	ReplayAssistant string `json:"replay_assistant"`
+	ReplayResult    string `json:"replay_result"`
+}
+
+func (f *Fixture) LoadTrajectory() (*Trajectory, error) {
+	if f.TrajectoryFile == "" {
+		return nil, fmt.Errorf("fixture %s declares no trajectory", f.ID)
+	}
+	var t Trajectory
+	if err := loadJSON(f.Path(f.TrajectoryFile), &t); err != nil {
+		return nil, err
+	}
+	if t.Schema != "agentbench/trajectory/v1" {
+		return nil, fmt.Errorf("trajectory %s: unsupported schema %q", f.TrajectoryFile, t.Schema)
+	}
+	if len(t.Turns) == 0 {
+		return nil, fmt.Errorf("trajectory %s has no turns", t.ID)
+	}
+	for i, turn := range t.Turns {
+		if turn.Index != i {
+			return nil, fmt.Errorf("trajectory %s: turn %d declares index %d; "+
+				"turn order is the append order and must not be implicit", t.ID, i, turn.Index)
+		}
+		if strings.TrimSpace(turn.Objective) == "" {
+			return nil, fmt.Errorf("trajectory %s: turn %d has no objective", t.ID, i)
+		}
+	}
+	last := len(t.Turns) - 1
+	if strings.TrimSpace(t.Turns[last].ReplayResult) != "" {
+		return nil, fmt.Errorf("trajectory %s: the final turn has a replayed result, "+
+			"which nothing consumes; it would be recorded and never sent", t.ID)
+	}
+	if t.ScoredTurn < 0 || t.ScoredTurn > last {
+		return nil, fmt.Errorf("trajectory %s: scored_turn %d is outside 0..%d",
+			t.ID, t.ScoredTurn, last)
+	}
+	return &t, nil
 }
 
 // --- engine --------------------------------------------------------------

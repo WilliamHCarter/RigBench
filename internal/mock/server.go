@@ -70,6 +70,13 @@ type Server struct {
 	// response so a fast run cannot be mistaken for a measurement.
 	TimeScale float64
 
+	// Cache, when set, simulates a served prefix cache: cached prompt bytes are
+	// reported as hit tokens and are not charged prefill time. Leave it nil to
+	// serve a cacheless endpoint, which is what a cold run wants.
+	Cache *PrefixCache
+	// CacheBlockBytes is the granularity a simulated cache reuses at.
+	CacheBlockBytes int
+
 	mu       sync.Mutex
 	requests int
 }
@@ -144,6 +151,22 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 		promptTokens += approxTokens(m.Content)
 	}
 
+	// Simulated prefix reuse. Hit bytes are converted to tokens with the same
+	// crude ratio the prompt count uses, so hit + miss adds up to the prompt
+	// count this server reports and a reader can check that it does.
+	hitTokens, missTokens := 0, promptTokens
+	if s.Cache != nil {
+		whole := concatMessages(req.Messages)
+		hitBytes := s.Cache.Observe(whole, s.CacheBlockBytes)
+		if len(whole) > 0 {
+			hitTokens = promptTokens * hitBytes / len(whole)
+		}
+		if hitTokens > promptTokens {
+			hitTokens = promptTokens
+		}
+		missTokens = promptTokens - hitTokens
+	}
+
 	visible, reasoning := "", ""
 	if s.Respond != nil {
 		visible, reasoning = s.Respond(promptTokens)
@@ -158,12 +181,17 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-AgentBench-Mock-Profile", prof.Name)
 	w.Header().Set("X-AgentBench-Mock-Time-Scale", fmt.Sprintf("%g", scale))
+	if s.Cache != nil {
+		w.Header().Set("X-AgentBench-Mock-Cache", "simulated")
+	}
 	w.WriteHeader(http.StatusOK)
 
 	ctx := r.Context()
 
-	// Prefill: one delay before any token, sized by the prompt.
-	prefill := time.Duration((float64(promptTokens)/prof.PrefillTokS*1000+prof.BaseTTFTMS)*scale) * time.Millisecond
+	// Prefill: one delay before any token, sized by the prompt bytes that were
+	// *not* already resident. A cache hit buys prefill time, not decode time,
+	// which is the whole reason TTFT and wall are recorded separately.
+	prefill := time.Duration((float64(missTokens)/prof.PrefillTokS*1000+prof.BaseTTFTMS)*scale) * time.Millisecond
 	if !sleepCtx(ctx, prefill) {
 		return
 	}
@@ -222,6 +250,10 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 	timings := map[string]any{
 		"prefill_tok_s": prof.PrefillTokS,
 		"decode_tok_s":  prof.DecodeTokS,
+	}
+	if s.Cache != nil {
+		timings["prefix_cache_hit_tokens"] = hitTokens
+		timings["prefix_cache_miss_tokens"] = missTokens
 	}
 	if prof.Speculation != nil {
 		timings["speculation"] = map[string]any{

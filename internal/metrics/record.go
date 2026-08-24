@@ -123,6 +123,17 @@ type Record struct {
 	PromptLayout string `json:"prompt_layout"`
 	PromptSHA256 string `json:"prompt_sha256"`
 	PromptBytes  int    `json:"prompt_bytes"`
+	// StablePrefix describes the leading span a served prefix cache could reuse
+	// across turns. It is verified at serialization time to be a digest of a
+	// real byte prefix of the prompt, so a layout A/B can be read from it.
+	StablePrefixSHA256 string `json:"stable_prefix_sha256"`
+	StablePrefixBytes  int    `json:"stable_prefix_bytes"`
+	// AppendedBytes is how many bytes this turn added to the previous turn's
+	// prompt. Zero on turn 0. A turn that is not a pure append is a failure, not
+	// a large number here.
+	AppendedBytes int `json:"appended_bytes"`
+	// TurnCount is the length of the trajectory this row belongs to.
+	TurnCount int `json:"turn_count"`
 	// TokenizerID names what produced PromptTokensEstimated. It is not the
 	// target tokenizer until the v0.5 verifier lands, and a context variant is
 	// never labelled from this number.
@@ -160,6 +171,11 @@ type Record struct {
 	Thermal string `json:"thermal"`
 
 	// --- and was it any good ---
+	// Scored is false for a replay turn that carries no quality verdict. A nil
+	// Quality on an unscored turn means "not judged"; on a scored turn it would
+	// mean the scorer never ran, which is a different thing, so the reporter is
+	// told which it is rather than guessing.
+	Scored          bool            `json:"scored"`
 	OutputSHA256    string          `json:"output_sha256"`
 	OutputBytes     int             `json:"output_bytes"`
 	TransportStatus TransportStatus `json:"transport_status"`

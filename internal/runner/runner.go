@@ -49,9 +49,9 @@ type Options struct {
 	// a committed file.
 	EndpointOverride string
 
-	// TurnObjectives are the volatile tail, one entry per turn. v0.1 sends
-	// exactly one.
-	TurnObjectives []string
+	// Trajectory, when set, drives a multi-turn replay. When nil the runner
+	// sends the fixture's single turn-0 objective.
+	Trajectory *config.Trajectory
 }
 
 // Result is one completed builder request plus the paths it wrote.
@@ -61,7 +61,12 @@ type Result struct {
 	Output   string
 }
 
-// BuildPrompt assembles and verifies the prompt without sending anything.
+// BuildPrompt assembles and verifies the prompt for one turn without sending
+// anything.
+//
+// Turn N's prompt is turn N-1's prompt plus the previous turn's replayed
+// assistant message, the previous turn's replayed tool result, and this turn's
+// objective. Nothing earlier is rewritten, summarized or reordered.
 func BuildPrompt(o Options, turnIndex int) (*prompt.Manifest, error) {
 	f := o.Fixture
 
@@ -102,8 +107,35 @@ func BuildPrompt(o Options, turnIndex int) (*prompt.Manifest, error) {
 		return nil, err
 	}
 
-	if len(o.TurnObjectives) > 0 {
-		objective = o.TurnObjectives[0]
+	// The volatile tail. Turn 0's objective occupies the layout's `objective`
+	// slot; everything after it is appended through the `turns` slot, so a
+	// layout that places the objective early and the tail late keeps working.
+	var tail []prompt.TailBlock
+	if t := o.Trajectory; t != nil {
+		if turnIndex < 0 || turnIndex >= len(t.Turns) {
+			return nil, fmt.Errorf("turn %d is outside trajectory %s (%d turns)",
+				turnIndex, t.ID, len(t.Turns))
+		}
+		objective = t.Turns[0].Objective
+		for i := 0; i < turnIndex; i++ {
+			prev := t.Turns[i]
+			if strings.TrimSpace(prev.ReplayAssistant) != "" {
+				tail = append(tail, prompt.TailBlock{
+					ID:   fmt.Sprintf("turn%d_assistant", i),
+					Role: prompt.Assistant, Text: prev.ReplayAssistant,
+				})
+			}
+			if strings.TrimSpace(prev.ReplayResult) != "" {
+				tail = append(tail, prompt.TailBlock{
+					ID:   fmt.Sprintf("turn%d_result", i),
+					Role: prompt.User, Text: prev.ReplayResult,
+				})
+			}
+			tail = append(tail, prompt.TailBlock{
+				ID:   fmt.Sprintf("turn%d_objective", i+1),
+				Role: prompt.User, Text: t.Turns[i+1].Objective,
+			})
+		}
 	}
 
 	src := prompt.Sources{
@@ -113,15 +145,12 @@ func BuildPrompt(o Options, turnIndex int) (*prompt.Manifest, error) {
 		prompt.SlotSourceContext: sourceCtx,
 		prompt.SlotObjective:     objective,
 	}
-	if turnIndex > 0 && len(o.TurnObjectives) > turnIndex {
-		src[prompt.SlotTurns] = strings.Join(o.TurnObjectives[1:turnIndex+1], "\n")
-	}
 
 	spec, err := toSpec(o.Layout)
 	if err != nil {
 		return nil, err
 	}
-	blocks, err := prompt.Resolve(spec, src, o.Tokenizer)
+	blocks, err := prompt.Resolve(spec, src, tail, o.Tokenizer)
 	if err != nil {
 		return nil, err
 	}
@@ -167,16 +196,48 @@ func toSpec(l *config.Layout) (prompt.LayoutSpec, error) {
 	return spec, nil
 }
 
-// RunBuilder performs one builder request and scores it.
-func RunBuilder(ctx context.Context, o Options) (*Result, error) {
+// TurnOptions carries the per-turn state RunTurn needs beyond Options.
+type TurnOptions struct {
+	Index int
+	// Prev is the previous turn's manifest, used to assert this turn is a pure
+	// append and to measure how many bytes it added.
+	Prev *prompt.Manifest
+	// Score decides whether this turn's output goes through the builder gates.
+	// A replay turn before the scored one is a context-growth measurement and
+	// carries no quality verdict.
+	Score bool
+	// Thermal overrides Options.Thermal for this turn. Turn 0 of a cold run is
+	// cold; the turns that follow it are warm against a resident server.
+	Thermal string
+	// TurnCount is the trajectory length, recorded on every row.
+	TurnCount int
+}
+
+// RunTurn performs one request and, when asked, scores it.
+func RunTurn(ctx context.Context, o Options, t TurnOptions) (*Result, error) {
 	f, e := o.Fixture, o.Engine
 
-	m, err := BuildPrompt(o, 0)
+	m, err := BuildPrompt(o, t.Index)
 	if err != nil {
 		return nil, err
 	}
+	// The append property is asserted before the request is sent. A turn that
+	// rewrote earlier bytes makes every prefix-cache number downstream
+	// meaningless, so it is a hard error rather than a note in the report.
+	if err := m.AppendsOnto(t.Prev); err != nil {
+		return nil, err
+	}
+	appended := 0
+	if t.Prev != nil {
+		appended = m.PromptBytes - t.Prev.PromptBytes
+	}
 
-	slug := fmt.Sprintf("%s.%s.%s.%s.t0", e.Name, o.Layout.ID, o.ContextPack, o.Thermal)
+	thermal := t.Thermal
+	if thermal == "" {
+		thermal = o.Thermal
+	}
+
+	slug := fmt.Sprintf("%s.%s.%s.%s.t%d", e.Name, o.Layout.ID, o.ContextPack, thermal, t.Index)
 	artDir := filepath.Join(o.RunDir, "artifacts", slug)
 	if err := os.MkdirAll(artDir, 0o755); err != nil {
 		return nil, err
@@ -228,7 +289,8 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 		FixtureVersion: f.Version,
 		Lane:           metrics.LaneBuilder,
 		ContextVariant: o.ContextPack,
-		TurnIndex:      0,
+		TurnIndex:      t.Index,
+		TurnCount:      t.TurnCount,
 
 		Engine:       e.Name,
 		Model:        e.Model,
@@ -246,6 +308,9 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 		PromptLayout:          o.Layout.ID,
 		PromptSHA256:          m.PromptSHA256,
 		PromptBytes:           m.PromptBytes,
+		StablePrefixSHA256:    m.StablePrefixSHA256,
+		StablePrefixBytes:     m.StablePrefixBytes,
+		AppendedBytes:         appended,
 		TokenizerID:           m.TokenizerID,
 		PromptTokensEstimated: m.PromptTokensEstimated,
 
@@ -264,12 +329,13 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 		DFlashAcceptRate:      tel.DFlashAcceptRate,
 		DFlashBlock:           tel.DFlashBlock,
 
-		Thermal: o.Thermal,
+		Thermal: thermal,
 
 		OutputSHA256:    res.OutputSHA256,
 		OutputBytes:     res.OutputBytes,
 		TransportStatus: res.TransportStatus,
 		HTTPStatus:      metrics.Ptr(res.HTTPStatus),
+		Scored:          t.Score,
 
 		Artifacts: map[string]string{
 			"prompt":          filepath.ToSlash(filepath.Join("artifacts", slug, "prompt.txt")),
@@ -289,6 +355,7 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 	// A transport failure is retained as a measurement and scored as a failure.
 	// It is never retried into green.
 	if res.TransportStatus != metrics.TransportOK {
+		rec.Scored = true
 		rec.Quality = &metrics.Quality{
 			Passed: false,
 			Gates: []metrics.Gate{{
@@ -296,6 +363,10 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 				Detail: fmt.Sprintf("%s: %v", res.TransportStatus, res.Err),
 			}},
 		}
+		return &Result{Record: rec, Manifest: m, Output: res.Visible}, nil
+	}
+
+	if !t.Score {
 		return &Result{Record: rec, Manifest: m, Output: res.Visible}, nil
 	}
 
@@ -315,6 +386,45 @@ func RunBuilder(ctx context.Context, o Options) (*Result, error) {
 	}
 	rec.Quality = q
 	return &Result{Record: rec, Manifest: m, Output: res.Visible}, nil
+}
+
+// RunBuilder sends the fixture's single turn-0 objective and scores it.
+func RunBuilder(ctx context.Context, o Options) (*Result, error) {
+	return RunTurn(ctx, o, TurnOptions{Index: 0, Score: true, TurnCount: 1})
+}
+
+// RunTrajectory replays a multi-turn builder loop against one engine.
+//
+// Thermal classification is per turn and is derived from the run's declared
+// class rather than from elapsed time: turn 0 of a cold run is cold, and the
+// turns that follow it hit a server that is now resident, so they are
+// warm-resident. A run declared steady is steady throughout.
+func RunTrajectory(ctx context.Context, o Options) ([]*Result, error) {
+	t := o.Trajectory
+	if t == nil {
+		return nil, fmt.Errorf("RunTrajectory needs a trajectory")
+	}
+	var out []*Result
+	var prev *prompt.Manifest
+	for i := range t.Turns {
+		thermal := o.Thermal
+		if o.Thermal == "cold" && i > 0 {
+			thermal = "warm-resident"
+		}
+		res, err := RunTurn(ctx, o, TurnOptions{
+			Index:     i,
+			Prev:      prev,
+			Score:     i == t.ScoredTurn,
+			Thermal:   thermal,
+			TurnCount: len(t.Turns),
+		})
+		if err != nil {
+			return out, fmt.Errorf("turn %d: %w", i, err)
+		}
+		prev = res.Manifest
+		out = append(out, res)
+	}
+	return out, nil
 }
 
 func nilIfEmpty(s string) *string {

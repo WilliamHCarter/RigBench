@@ -23,6 +23,11 @@ func cmdMock(args []string) error {
 		"canned response: "+variantList())
 	timeScale := fs.Float64("time-scale", 1.0,
 		"multiply every simulated delay; 1.0 reproduces the recorded throughputs")
+	cache := fs.Bool("cache", false,
+		"simulate a served prefix cache: cached prompt bytes are reported as hit "+
+			"tokens and are not charged prefill time")
+	cacheBlock := fs.Int("cache-block", 256,
+		"granularity a simulated cache reuses at, in prompt bytes")
 	fs.Parse(args)
 
 	f, err := config.LoadFixture(*fixtureDir)
@@ -45,6 +50,10 @@ func cmdMock(args []string) error {
 		TimeScale:  *timeScale,
 		ProfileFor: profileFromRequest,
 		Respond:    func(int) (string, string) { return body, "" },
+	}
+	if *cache {
+		srv.Cache = mock.NewPrefixCache(64)
+		srv.CacheBlockBytes = *cacheBlock
 	}
 	ln, shutdown, err := srv.Listen(*addr)
 	if err != nil {

@@ -6,7 +6,7 @@
 //	run             run one or more engine configs against a fixture lane
 //	mock            serve the deterministic in-repo mock endpoint
 //	report          re-render summary.md and summary.csv from a run's JSONL
-//	smoke           the v0.1 acceptance gate, end to end, against the mock
+//	smoke           the acceptance gates, end to end, against the mock
 package main
 
 import (
@@ -21,7 +21,8 @@ usage:
   agentbench run            [flags]   run engine configs against a fixture lane
   agentbench mock           [flags]   serve the deterministic mock endpoint
   agentbench report         [flags]   re-render a run's summary from its JSONL
-  agentbench smoke          [flags]   v0.1 acceptance gate, end to end, on the mock
+  agentbench smoke          [flags]   acceptance gates, end to end, on the mock
+                                      (-slice v0.1 | v0.2 | all)
 
 run "agentbench <subcommand> -h" for flags.
 `

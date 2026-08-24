@@ -14,7 +14,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | Slice | State |
 |---|---|
 | v0.1 — single-call runner + cold builder fixture | complete, acceptance gate green |
-| v0.2 — multi-turn builder replay + prefix layout | in progress |
+| v0.2 — multi-turn builder replay + prefix layout | complete, acceptance gate green |
 | v0.3 and later | not started |
 
 ## Quick start
@@ -25,16 +25,28 @@ Prove the fixture's controls fire before trusting any result:
 go run ./cmd/agentbench verify-fixture
 ```
 
-Run the end-to-end acceptance gate against the in-repo mock endpoint:
+Run the end-to-end acceptance gates against the in-repo mock endpoint:
 
 ```bash
 go run ./cmd/agentbench smoke
+```
+
+Just one slice's gate:
+
+```bash
+go run ./cmd/agentbench smoke -slice v0.2
 ```
 
 Run against a real endpoint:
 
 ```bash
 go run ./cmd/agentbench run -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://rig:8080/v1 -thermal cold -verify-fixture
+```
+
+Replay the four-turn builder trajectory instead of a single turn:
+
+```bash
+go run ./cmd/agentbench run -turns -layout configs/layouts/builder-cache-friendly.json -thermal cold
 ```
 
 ## Layout
@@ -73,7 +85,12 @@ runs/<run-id>/               volatile output; never embedded into a prompt
   in the summary rather than averaged.
 - **Prompt layout is a benchmark input.** Stable bytes precede volatile ones,
   later turns append rather than rewrite, and the reusable-prefix digest is
-  verified to be a digest of a real byte prefix.
+  verified to be a digest of a real byte prefix. A layout A/B is required to be a
+  pure reordering of identical bytes, so a "cache-friendly" layout cannot win by
+  quietly rewording the prompt.
+- **A replay turn carries no verdict.** A four-turn replay judges its scored turn
+  and records the rest as context-growth measurements. They are never counted as
+  failures.
 
 ## The fixture proves itself before it measures anything
 
@@ -94,7 +111,19 @@ Two controls run before any result is trusted:
   suite. That is the hidden suite earning its place rather than restating the
   visible one.
 
-See [docs/v0.1.md](docs/v0.1.md) for the slice record.
+## What the layout A/B actually shows
+
+Within one story both layouts append cleanly: a volatile-first layout's leading
+objective does not change between turns of the same task, so turn-to-turn reuse
+is not where they differ. The difference is **across tasks** — what a second
+story could reuse from the first:
+
+| Layout | Reusable prefix | Share of prompt | Cross-task reuse |
+|---|---|---|---|
+| `builder-cache-friendly` | 27,191 B | 69% | 27,136 B (98%) |
+| `builder-current` | 1,552 B | 4% | 1,536 B (6%) |
+
+Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md).
 
 ## Toolchain
 

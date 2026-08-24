@@ -57,7 +57,13 @@ func cmdSmoke(args []string) error {
 		"mock delay multiplier; the acceptance gate is about gates, not speed")
 	skipVerify := fs.Bool("skip-verify", false, "skip the fixture control set (not recommended)")
 	only := fs.String("only", "", "comma-separated variants to exercise")
+	slice := fs.String("slice", "all", "which acceptance gate to run: v0.1, v0.2 or all")
 	fs.Parse(args)
+	switch *slice {
+	case "v0.1", "v0.2", "all":
+	default:
+		return fmt.Errorf("-slice must be v0.1, v0.2 or all, not %q", *slice)
+	}
 
 	ctx := context.Background()
 	f, err := config.LoadFixture(*fixtureDir)
@@ -71,7 +77,7 @@ func cmdSmoke(args []string) error {
 		return err
 	}
 
-	fmt.Printf("AgentBench-01 v0.1 acceptance gate\n")
+	fmt.Printf("AgentBench-01 acceptance gate (%s)\n", *slice)
 	fmt.Printf("fixture %s v%s   output %s\n\n", f.ID, f.Version, root)
 
 	// --- 1. the fixture must prove itself before it measures anything ---
@@ -108,6 +114,22 @@ func cmdSmoke(args []string) error {
 		if invisible == 0 {
 			return fmt.Errorf("no control is invisible to the visible suite")
 		}
+	}
+
+	if *slice == "v0.2" {
+		fmt.Println("== v0.2: multi-turn replay and prefix layout ==")
+		if _, err := acceptV02(ctx, v02Options{
+			fixtureDir: *fixtureDir, engines: *engines,
+			layouts: []string{
+				"configs/layouts/builder-cache-friendly.json",
+				"configs/layouts/builder-current.json",
+			},
+			root: root, timeScale: *timeScale,
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("\nv0.2 acceptance gate: PASS\noutput under %s\n", root)
+		return nil
 	}
 
 	// --- 2. every gate must be individually reachable ---
@@ -224,6 +246,22 @@ func cmdSmoke(args []string) error {
 		return fmt.Errorf("%d acceptance row(s) did not behave as declared", failures)
 	}
 	fmt.Printf("\nv0.1 acceptance gate: PASS\n")
+
+	if *slice == "all" {
+		fmt.Println("\n== v0.2: multi-turn replay and prefix layout ==")
+		if _, err := acceptV02(ctx, v02Options{
+			fixtureDir: *fixtureDir, engines: *engines,
+			layouts: []string{
+				"configs/layouts/builder-cache-friendly.json",
+				"configs/layouts/builder-current.json",
+			},
+			root: root, timeScale: *timeScale,
+		}); err != nil {
+			return err
+		}
+		fmt.Printf("\nv0.2 acceptance gate: PASS\n")
+	}
+
 	fmt.Printf("output under %s\n", root)
 	return nil
 }

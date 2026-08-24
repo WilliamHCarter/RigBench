@@ -29,6 +29,25 @@ type SummaryInput struct {
 	// Caveats are run-specific warnings, for example that the endpoint was the
 	// in-repo mock.
 	Caveats []string
+
+	// LayoutComparison is populated when a run measured more than one prompt
+	// layout over the same content.
+	LayoutComparison []LayoutRow
+}
+
+// LayoutRow is one layout's reusable-prefix result in an A/B.
+type LayoutRow struct {
+	Layout            string
+	StablePrefixBytes int
+	// Share is StablePrefixBytes over the whole prompt, in [0,1].
+	Share float64
+	// CrossTaskReuseBytes is how much of a *second* task's prompt a cache
+	// holding the first task's prompt could reuse. This is where the layouts
+	// actually differ: within one story both append cleanly, because a
+	// volatile-first layout's leading objective does not change between turns
+	// of the same task.
+	CrossTaskReuseBytes int
+	Note                string
 }
 
 // WriteSummary renders summary.md.
@@ -51,14 +70,16 @@ func WriteSummary(path string, in SummaryInput) error {
 	if len(in.Cells) == 0 {
 		w("No records.\n\n")
 	} else {
-		w("| Config | Thermal | n | Pass | Fail | Failing gates |\n")
-		w("|---|---|---|---|---|---|\n")
+		w("| Config | Layout | Thermal | n | Pass | Fail | Unscored | Failing gates |\n")
+		w("|---|---|---|---|---|---|---|---|\n")
 		for _, c := range in.Cells {
-			w("| `%s` | %s | %d | %d | %d | %s |\n",
-				c.Key.Engine, c.Key.Thermal, c.N, c.Passed, c.Failed,
+			w("| `%s` | `%s` | %s | %d | %d | %d | %d | %s |\n",
+				c.Key.Engine, c.Key.PromptLayout, c.Key.Thermal, c.N,
+				c.Passed, c.Failed, c.Unscored,
 				gateSummary(c.FailedGateCounts))
 		}
-		w("\n")
+		w("\nUnscored rows are replay turns that carry no quality verdict. They are ")
+		w("not failures; a four-turn replay judges only its scored turn.\n\n")
 	}
 
 	// --- 2. wall clock -----------------------------------------------------
@@ -66,20 +87,25 @@ func WriteSummary(path string, in SummaryInput) error {
 	w("Median, with min..max where a cell has more than one repetition. ")
 	w("The builder score is time to a quality-gated passing patch; a failing ")
 	w("row keeps its timing but is not eligible to be a champion.\n\n")
-	w("| Config | Thermal | Eligible | Wall ms | Visible TTFT ms | Reasoning TTFT ms |\n")
-	w("|---|---|---|---|---|---|\n")
+	w("| Config | Layout | Thermal | Eligible | Wall ms | Visible TTFT ms | Reasoning TTFT ms |\n")
+	w("|---|---|---|---|---|---|---|\n")
 	for _, c := range in.Cells {
 		eligible := "no"
-		if c.Passed > 0 && c.Failed == 0 {
+		switch {
+		case c.Passed == 0 && c.Failed == 0:
+			eligible = "unscored"
+		case c.Passed > 0 && c.Failed == 0:
 			eligible = "yes"
-		} else if c.Passed > 0 {
+		case c.Passed > 0:
 			eligible = "partial"
 		}
-		w("| `%s` | %s | %s | %s | %s | %s |\n",
-			c.Key.Engine, c.Key.Thermal, eligible,
+		w("| `%s` | `%s` | %s | %s | %s | %s | %s |\n",
+			c.Key.Engine, c.Key.PromptLayout, c.Key.Thermal, eligible,
 			c.WallMS, c.VisibleTTFT, c.ReasonTTFT)
 	}
-	w("\n")
+	w("\nCold and warm rows are separate cells and are never averaged together. ")
+	w("The thermal class is stated by the operator; it is not inferred from ")
+	w("elapsed time.\n\n")
 
 	// --- 3. explanatory telemetry ------------------------------------------
 	w("## 3. Explanatory telemetry\n\n")
@@ -96,6 +122,43 @@ func WriteSummary(path string, in SummaryInput) error {
 	w("\nThe derived decode rate is this runner's own completion-tokens over the ")
 	w("streaming window. It is shown beside the engine's own figure and never ")
 	w("merged with it: one is a client stopwatch, the other a server counter.\n\n")
+
+	// --- 3b. prompt growth and reusable prefix ----------------------------
+	w("### Prompt growth and reusable prefix\n\n")
+	w("`Stable prefix` is measured by the runner from the prompt bytes it sent, ")
+	w("independently of any engine: it is the leading span of non-volatile ")
+	w("blocks, verified at serialization time to be a real byte prefix of the ")
+	w("whole prompt. `Prefix hit` is what the engine reported, and is `not ")
+	w("exposed` when it reported nothing.\n\n")
+	w("| Config | Layout | Thermal | Prompt bytes | Stable prefix bytes | Reusable | Appended per turn | Prefix hit tok |\n")
+	w("|---|---|---|---|---|---|---|---|\n")
+	for _, c := range in.Cells {
+		reusable := "-"
+		if c.PromptBytes.N > 0 && c.PromptBytes.Median > 0 {
+			reusable = fmt.Sprintf("%.0f%%", 100*c.StablePrefixBytes.Median/c.PromptBytes.Median)
+		}
+		w("| `%s` | `%s` | %s | %s | %s | %s | %s | %s |\n",
+			c.Key.Engine, c.Key.PromptLayout, c.Key.Thermal,
+			c.PromptBytes, c.StablePrefixBytes, reusable, c.AppendedBytes, c.PrefixHit)
+	}
+	w("\n")
+
+	if len(in.LayoutComparison) > 0 {
+		w("### Layout A/B\n\n")
+		w("The compared layouts carry identical block bytes and differ only in ")
+		w("order and message boundaries, so any difference below is attributable ")
+		w("to layout and not to a reworded prompt.\n\n")
+		w("| Layout | Reusable prefix bytes | Share of prompt | Cross-task reuse bytes | Verdict |\n")
+		w("|---|---|---|---|---|\n")
+		for _, l := range in.LayoutComparison {
+			w("| `%s` | %d | %.0f%% | %d | %s |\n",
+				l.Layout, l.StablePrefixBytes, 100*l.Share, l.CrossTaskReuseBytes, l.Note)
+		}
+		w("\nWithin a single story both layouts append cleanly, so turn-to-turn reuse ")
+		w("is **not** where they differ: a volatile-first layout's leading objective ")
+		w("does not change between turns of the same task. The difference is the ")
+		w("cross-task column — what a second story could reuse from the first.\n\n")
+	}
 
 	// --- 4. comparability --------------------------------------------------
 	w("## 4. Comparability\n\n")
@@ -201,20 +264,35 @@ func WriteSummary(path string, in SummaryInput) error {
 
 	// --- 7. per-request appendix ------------------------------------------
 	w("## 7. Requests\n\n")
-	w("| # | Engine | Thermal | Wall ms | Transport | Passed | Failing gates | Output sha256 |\n")
-	w("|---|---|---|---|---|---|---|---|\n")
+	w("| # | Engine | Layout | Turn | Thermal | Wall ms | Visible TTFT | Prompt B | Appended B | Prefix B | Transport | Verdict | Failing gates |\n")
+	w("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for i, r := range in.Records {
-		passed := "no"
-		if r.Quality != nil && r.Quality.Passed {
-			passed = "yes"
+		verdict := "unscored"
+		if r.Scored {
+			verdict = "FAIL"
+			if r.Quality != nil && r.Quality.Passed {
+				verdict = "pass"
+			}
 		}
-		sha := r.OutputSHA256
-		if len(sha) > 12 {
-			sha = sha[:12]
+		turn := fmt.Sprintf("%d", r.TurnIndex)
+		if r.TurnCount > 1 {
+			turn = fmt.Sprintf("%d/%d", r.TurnIndex, r.TurnCount-1)
 		}
-		w("| %d | `%s` | %s | %.0f | %s | %s | %s | `%s` |\n",
-			i+1, r.Engine, r.Thermal, r.WallMS, r.TransportStatus, passed,
-			strings.Join(qualityFails(r.Quality), " "), sha)
+		appended := "-"
+		if r.TurnIndex > 0 {
+			appended = fmt.Sprintf("%d", r.AppendedBytes)
+		}
+		ttft := "-"
+		if r.VisibleTTFTMS != nil {
+			ttft = fmt.Sprintf("%.0f", *r.VisibleTTFTMS)
+		}
+		gates := "—"
+		if r.Scored {
+			gates = strings.Join(qualityFails(r.Quality), " ")
+		}
+		w("| %d | `%s` | `%s` | %s | %s | %.0f | %s | %d | %s | %d | %s | %s | %s |\n",
+			i+1, r.Engine, r.PromptLayout, turn, r.Thermal, r.WallMS, ttft,
+			r.PromptBytes, appended, r.StablePrefixBytes, r.TransportStatus, verdict, gates)
 	}
 	w("\n")
 

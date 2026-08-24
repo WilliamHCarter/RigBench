@@ -13,10 +13,12 @@
 package report
 
 import (
+	"encoding/csv"
 	"fmt"
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/WilliamHCarter/RigBench/internal/metrics"
@@ -42,6 +44,11 @@ type Cell struct {
 
 	Passed int
 	Failed int
+	// Unscored counts replay turns that carry no quality verdict. They are not
+	// failures and must never be counted as any: a four-turn replay has three
+	// turns nobody judged, and a report that called them failures would show a
+	// green run as 25% passing.
+	Unscored int
 	// FailedGateCounts is why the failures failed, so a regression is
 	// attributable without opening the logs.
 	FailedGateCounts map[string]int
@@ -57,9 +64,15 @@ type Cell struct {
 	CompletionTokens Stat
 	ReasoningTokens  Stat
 
-	PrefixHit         Stat
-	PrefixMiss        Stat
+	PrefixHit  Stat
+	PrefixMiss Stat
+
+	PromptBytes       Stat
 	StablePrefixBytes Stat
+	// AppendedBytes covers turns after the first only. Turn 0 appends to
+	// nothing, and including its zero would halve the median of a four-turn
+	// replay.
+	AppendedBytes Stat
 
 	Tau        Stat
 	AcceptRate Stat
@@ -165,7 +178,8 @@ func Aggregate(records []metrics.Record) []Cell {
 func buildCell(k Key, rows []metrics.Record) Cell {
 	c := Cell{Key: k, N: len(rows), rows: rows, FailedGateCounts: map[string]int{}}
 
-	var wall, vttft, rttft, dec, decd, pre, pt, ct, rt, hit, miss, tau, acc, spb []float64
+	var wall, vttft, rttft, dec, decd, pre, pt, ct, rt, hit, miss, tau, acc []float64
+	var pbytes, spb, appended []float64
 	var missWall, missV, missR, missDec, missDecD, missPre, missPT, missCT, missRT, missHit, missMiss, missTau, missAcc int
 
 	promptSHAs := map[string]bool{}
@@ -197,7 +211,11 @@ func buildCell(k Key, rows []metrics.Record) Cell {
 		modelHashes[deref(r.ModelHash)] = true
 
 		wall = append(wall, r.WallMS)
-		spb = append(spb, float64(r.PromptBytes))
+		pbytes = append(pbytes, float64(r.PromptBytes))
+		spb = append(spb, float64(r.StablePrefixBytes))
+		if r.TurnIndex > 0 {
+			appended = append(appended, float64(r.AppendedBytes))
+		}
 		addF(&vttft, &missV, r.VisibleTTFTMS)
 		addF(&rttft, &missR, r.ReasoningTTFTMS)
 		addF(&dec, &missDec, r.DecodeTokS)
@@ -211,6 +229,10 @@ func buildCell(k Key, rows []metrics.Record) Cell {
 		addF(&tau, &missTau, r.DFlashTau)
 		addF(&acc, &missAcc, r.DFlashAcceptRate)
 
+		if !r.Scored {
+			c.Unscored++
+			continue
+		}
 		if r.Quality != nil && r.Quality.Passed {
 			c.Passed++
 		} else {
@@ -239,7 +261,9 @@ func buildCell(k Key, rows []metrics.Record) Cell {
 	c.PrefixMiss = stat(miss, missMiss)
 	c.Tau = stat(tau, missTau)
 	c.AcceptRate = stat(acc, missAcc)
+	c.PromptBytes = stat(pbytes, 0)
 	c.StablePrefixBytes = stat(spb, 0)
+	c.AppendedBytes = stat(appended, 0)
 
 	c.Model = joinSet(models)
 	c.ThinkingMode = joinSet(thinking)
@@ -284,30 +308,77 @@ func joinSet(m map[string]bool) string {
 	return strings.Join(out, ", ")
 }
 
+// column pairs a CSV header with the function that produces its value.
+//
+// Built as pairs rather than as a header string plus a positional Fprintf: the
+// positional form silently drifts the moment a column is inserted, and a
+// benchmark whose CSV columns are off by one is worse than one with no CSV.
+type column struct {
+	name string
+	get  func(Cell) string
+}
+
+var columns = []column{
+	{"lane", func(c Cell) string { return c.Key.Lane }},
+	{"context", func(c Cell) string { return c.Key.ContextVariant }},
+	{"layout", func(c Cell) string { return c.Key.PromptLayout }},
+	{"engine", func(c Cell) string { return c.Key.Engine }},
+	{"thermal", func(c Cell) string { return c.Key.Thermal }},
+	{"n", func(c Cell) string { return strconv.Itoa(c.N) }},
+	{"passed", func(c Cell) string { return strconv.Itoa(c.Passed) }},
+	{"failed", func(c Cell) string { return strconv.Itoa(c.Failed) }},
+	{"unscored", func(c Cell) string { return strconv.Itoa(c.Unscored) }},
+	{"wall_ms_median", func(c Cell) string { return csvStat(c.WallMS, "median") }},
+	{"wall_ms_min", func(c Cell) string { return csvStat(c.WallMS, "min") }},
+	{"wall_ms_max", func(c Cell) string { return csvStat(c.WallMS, "max") }},
+	{"visible_ttft_ms_median", func(c Cell) string { return csvStat(c.VisibleTTFT, "median") }},
+	{"reasoning_ttft_ms_median", func(c Cell) string { return csvStat(c.ReasonTTFT, "median") }},
+	{"prompt_tokens_median", func(c Cell) string { return csvStat(c.PromptTokens, "median") }},
+	{"completion_tokens_median", func(c Cell) string { return csvStat(c.CompletionTokens, "median") }},
+	{"reasoning_tokens_median", func(c Cell) string { return csvStat(c.ReasoningTokens, "median") }},
+	{"prefill_tok_s_median", func(c Cell) string { return csvStat(c.PrefillTokS, "median") }},
+	{"decode_tok_s_median", func(c Cell) string { return csvStat(c.DecodeTokS, "median") }},
+	{"decode_tok_s_derived_median", func(c Cell) string { return csvStat(c.DecodeTokSDerived, "median") }},
+	{"prefix_hit_tokens_median", func(c Cell) string { return csvStat(c.PrefixHit, "median") }},
+	{"prefix_miss_tokens_median", func(c Cell) string { return csvStat(c.PrefixMiss, "median") }},
+	{"dflash_tau_median", func(c Cell) string { return csvStat(c.Tau, "median") }},
+	{"dflash_accept_rate_median", func(c Cell) string { return csvStat(c.AcceptRate, "median") }},
+	{"prompt_bytes_median", func(c Cell) string { return csvStat(c.PromptBytes, "median") }},
+	{"stable_prefix_bytes_median", func(c Cell) string { return csvStat(c.StablePrefixBytes, "median") }},
+	{"appended_bytes_median", func(c Cell) string { return csvStat(c.AppendedBytes, "median") }},
+	{"prompt_sha256", func(c Cell) string { return c.PromptSHA }},
+	{"incomparable", func(c Cell) string { return strings.Join(c.Incomparable, "; ") }},
+}
+
+// Columns lists the CSV header, exported so a test can assert every row has as
+// many fields as the header has names.
+func Columns() []string {
+	out := make([]string, len(columns))
+	for i, c := range columns {
+		out[i] = c.name
+	}
+	return out
+}
+
 // WriteCSV emits one row per cell for downstream analysis.
 func WriteCSV(path string, cells []Cell) error {
 	var b strings.Builder
-	b.WriteString("lane,context,layout,engine,thermal,n,passed,failed," +
-		"wall_ms_median,wall_ms_min,wall_ms_max,visible_ttft_ms_median," +
-		"reasoning_ttft_ms_median,prompt_tokens_median,completion_tokens_median," +
-		"reasoning_tokens_median,prefill_tok_s_median,decode_tok_s_median," +
-		"decode_tok_s_derived_median," +
-		"prefix_hit_tokens_median,prefix_miss_tokens_median,dflash_tau_median," +
-		"dflash_accept_rate_median,prompt_sha256,incomparable\n")
+	w := csv.NewWriter(&b)
+	if err := w.Write(Columns()); err != nil {
+		return err
+	}
 	for _, c := range cells {
-		fmt.Fprintf(&b, "%s,%s,%s,%s,%s,%d,%d,%d,"+
-			"%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%q\n",
-			c.Key.Lane, c.Key.ContextVariant, c.Key.PromptLayout, c.Key.Engine, c.Key.Thermal,
-			c.N, c.Passed, c.Failed,
-			csvStat(c.WallMS, "median"), csvStat(c.WallMS, "min"), csvStat(c.WallMS, "max"),
-			csvStat(c.VisibleTTFT, "median"), csvStat(c.ReasonTTFT, "median"),
-			csvStat(c.PromptTokens, "median"), csvStat(c.CompletionTokens, "median"),
-			csvStat(c.ReasoningTokens, "median"),
-			csvStat(c.PrefillTokS, "median"), csvStat(c.DecodeTokS, "median"),
-			csvStat(c.DecodeTokSDerived, "median"),
-			csvStat(c.PrefixHit, "median"), csvStat(c.PrefixMiss, "median"),
-			csvStat(c.Tau, "median"), csvStat(c.AcceptRate, "median"),
-			c.PromptSHA, strings.Join(c.Incomparable, "; "))
+		row := make([]string, len(columns))
+		for i, col := range columns {
+			row[i] = col.get(c)
+		}
+		if err := w.Write(row); err != nil {
+			return err
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return err
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }

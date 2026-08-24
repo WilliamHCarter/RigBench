@@ -35,8 +35,17 @@ type runFlags struct {
 	runSubdir     string
 	endpoint      string
 	repeats       int
+	turns         bool
+	warmup        int
 	verifyFixture bool
 	caveats       []string
+	// layoutRows, when set, is rendered as the summary's layout A/B section.
+	layoutRows []report.LayoutRow
+	// preEngine runs before each engine's turns. A run declared cold must
+	// actually start cold for every config it compares, and only the caller
+	// knows how to produce that for its endpoint -- restarting a server,
+	// dropping a cache -- so the runner asks rather than assumes.
+	preEngine func(engineName string) error
 }
 
 func cmdRun(args []string) error {
@@ -53,6 +62,12 @@ func cmdRun(args []string) error {
 	fs.StringVar(&rf.runID, "run-id", "", "run id (default: a UTC timestamp)")
 	fs.StringVar(&rf.endpoint, "endpoint", "", "override every engine config's endpoint")
 	fs.IntVar(&rf.repeats, "repeats", 1, "repetitions per engine")
+	fs.BoolVar(&rf.turns, "turns", false,
+		"replay the fixture's multi-turn builder trajectory instead of a single turn")
+	fs.IntVar(&rf.warmup, "warmup", 0,
+		"discarded priming requests sent before the first measured turn. This is the "+
+			"resident-server warm protocol: warm is produced deliberately and recorded, "+
+			"never inferred from elapsed time.")
 	fs.BoolVar(&rf.verifyFixture, "verify-fixture", false,
 		"run the fixture's anti-vacuity controls first and refuse to run if any is broken")
 	fs.Parse(args)
@@ -87,6 +102,18 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	default:
 		return "", fmt.Errorf("thermal must be cold, first-capture or steady, not %q; "+
 			"warm is never inferred from elapsed time", rf.thermal)
+	}
+	if rf.warmup > 0 && rf.thermal == "cold" {
+		return "", fmt.Errorf("a cold run cannot be preceded by %d warmup request(s); "+
+			"declare -thermal steady, or drop -warmup", rf.warmup)
+	}
+
+	var traj *config.Trajectory
+	if rf.turns {
+		traj, err = f.LoadTrajectory()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	runID := rf.runID
@@ -130,7 +157,7 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			ZigPin: zigPin(f),
 		},
 		Thermal:      rf.thermal,
-		WarmupPolicy: "none; v0.1 sends one request per engine and states its thermal class explicitly",
+		WarmupPolicy: warmupPolicy(rf, traj),
 	}
 	for _, e := range engines {
 		ep := e.Endpoint
@@ -196,58 +223,69 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			}
 			fmt.Printf("-> %s (%s, %s, %s)\n", label, layout.ID, rf.contextPack, rf.thermal)
 
-			res, err := runner.RunBuilder(ctx, runner.Options{
+			if rf.preEngine != nil {
+				if err := rf.preEngine(e.Name); err != nil {
+					return "", fmt.Errorf("engine %s: preparing a %s start: %w",
+						e.Name, rf.thermal, err)
+				}
+			}
+
+			opts := runner.Options{
 				Fixture: f, Engine: e, Layout: layout,
 				ContextPack: rf.contextPack, Thermal: rf.thermal,
 				RunID: runID, RunDir: runDir, WorkDir: workDir,
 				Tokenizer: tok, EndpointOverride: rf.endpoint,
-			})
+				Trajectory: traj,
+			}
+
+			// The resident-server warm protocol: send and discard priming
+			// requests, then measure. The discarded requests are not recorded,
+			// but that they happened is, in run.json's warmup policy.
+			for i := 0; i < rf.warmup; i++ {
+				fmt.Printf("   warmup %d/%d (discarded)\n", i+1, rf.warmup)
+				if _, err := runner.RunTurn(ctx, opts, runner.TurnOptions{
+					Index: 0, Score: false, TurnCount: 1,
+					Thermal: "warmup-discarded",
+				}); err != nil {
+					return "", fmt.Errorf("engine %s warmup: %w", e.Name, err)
+				}
+			}
+
+			var results []*runner.Result
+			if traj != nil {
+				results, err = runner.RunTrajectory(ctx, opts)
+			} else {
+				var one *runner.Result
+				one, err = runner.RunBuilder(ctx, opts)
+				if one != nil {
+					results = []*runner.Result{one}
+				}
+			}
 			if err != nil {
 				return "", fmt.Errorf("engine %s: %w", e.Name, err)
 			}
-			promptHashes[res.Record.PromptSHA256] = append(
-				promptHashes[res.Record.PromptSHA256], e.Name)
-			if err := w.Write(res.Record); err != nil {
-				return "", err
-			}
-			records = append(records, *res.Record)
 
-			q := res.Record.Quality
-			verdict := "FAIL"
-			if q != nil && q.Passed {
-				verdict = "PASS"
-			}
-			fmt.Printf("   %s  wall %.0f ms", verdict, res.Record.WallMS)
-			if res.Record.VisibleTTFTMS != nil {
-				fmt.Printf("  visible ttft %.0f ms", *res.Record.VisibleTTFTMS)
-			}
-			fmt.Printf("  prompt %d bytes / ~%d tok (%s)\n",
-				res.Record.PromptBytes, res.Record.PromptTokensEstimated, res.Record.TokenizerID)
-			if q != nil {
-				for _, g := range q.Gates {
-					mark := map[metrics.GateResult]string{
-						metrics.GatePass: "pass", metrics.GateFail: "FAIL", metrics.GateSkipped: "skip",
-					}[g.Result]
-					detail := g.Detail
-					if len(detail) > 110 {
-						detail = detail[:110] + "..."
-					}
-					fmt.Printf("     %-4s %-18s %s\n", mark, g.Name, detail)
+			for _, res := range results {
+				r := res.Record
+				promptHashes[r.PromptSHA256] = append(promptHashes[r.PromptSHA256],
+					fmt.Sprintf("%s t%d", e.Name, r.TurnIndex))
+				if err := w.Write(r); err != nil {
+					return "", err
 				}
+				records = append(records, *r)
+				printTurn(r, traj != nil)
 			}
 			fmt.Println()
 		}
 	}
 
 	caveats := append([]string{}, rf.caveats...)
-	if len(promptHashes) > 1 {
-		var lines []string
-		for h, names := range promptHashes {
-			lines = append(lines, fmt.Sprintf("%s -> %s", h[:12], strings.Join(names, ", ")))
-		}
-		sort.Strings(lines)
+	// Engines being compared must have received identical prompt bytes at the
+	// same turn index. Across turns the bytes legitimately differ -- that is the
+	// point of a multi-turn replay -- so the check is per turn.
+	if bad := mismatchedTurns(records); len(bad) > 0 {
 		caveats = append(caveats, "**The compared configs did not receive the same prompt bytes**: "+
-			strings.Join(lines, "; ")+". The comparison is not valid.")
+			strings.Join(bad, "; ")+". The comparison is not valid.")
 	}
 	if rf.endpoint != "" {
 		caveats = append(caveats, fmt.Sprintf(
@@ -262,6 +300,7 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		Run: run, Records: records, Cells: cells,
 		Mutants: mutants, Tripwires: tripwires,
 		Unmeasured: f.Unmeasured, Caveats: caveats,
+		LayoutComparison: rf.layoutRows,
 	}); err != nil {
 		return "", err
 	}
@@ -280,5 +319,99 @@ func splitList(s string) []string {
 			out = append(out, p)
 		}
 	}
+	return out
+}
+
+// printTurn renders one request's outcome on the terminal.
+func printTurn(r *metrics.Record, multiTurn bool) {
+	verdict := "unscored"
+	if r.Scored {
+		verdict = "FAIL"
+		if r.Quality != nil && r.Quality.Passed {
+			verdict = "PASS"
+		}
+	}
+	turn := ""
+	if multiTurn {
+		turn = fmt.Sprintf(" t%d/%d", r.TurnIndex, r.TurnCount-1)
+	}
+	fmt.Printf("  %s%s  %s  wall %.0f ms", r.Thermal, turn, verdict, r.WallMS)
+	if r.VisibleTTFTMS != nil {
+		fmt.Printf("  ttft %.0f ms", *r.VisibleTTFTMS)
+	}
+	fmt.Printf("  prompt %d B", r.PromptBytes)
+	if r.TurnIndex > 0 {
+		fmt.Printf(" (+%d)", r.AppendedBytes)
+	}
+	fmt.Printf("  prefix %d B", r.StablePrefixBytes)
+	if r.PrefixCacheHitTokens != nil {
+		fmt.Printf("  cache hit %d tok", *r.PrefixCacheHitTokens)
+	}
+	fmt.Println()
+	if r.Scored && r.Quality != nil {
+		for _, g := range r.Quality.Gates {
+			mark := map[metrics.GateResult]string{
+				metrics.GatePass: "pass", metrics.GateFail: "FAIL", metrics.GateSkipped: "skip",
+			}[g.Result]
+			detail := g.Detail
+			if len(detail) > 100 {
+				detail = detail[:100] + "..."
+			}
+			fmt.Printf("     %-4s %-18s %s\n", mark, g.Name, detail)
+		}
+	}
+}
+
+// warmupPolicy records how warm was produced, so a reader never has to infer it.
+func warmupPolicy(rf *runFlags, traj *config.Trajectory) string {
+	var parts []string
+	if rf.warmup > 0 {
+		parts = append(parts, fmt.Sprintf("%d discarded priming request(s) before the first measured turn",
+			rf.warmup))
+	} else {
+		parts = append(parts, "no priming requests")
+	}
+	if traj != nil {
+		parts = append(parts, fmt.Sprintf(
+			"trajectory %s replayed over %d turns; in a cold run turn 0 is recorded cold "+
+				"and turns 1..%d as warm-resident, because the server is resident by then",
+			traj.ID, len(traj.Turns), len(traj.Turns)-1))
+	} else {
+		parts = append(parts, "single turn per engine")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// mismatchedTurns reports turn indices where the engines under comparison did
+// not receive identical prompt bytes.
+func mismatchedTurns(records []metrics.Record) []string {
+	type key struct {
+		layout string
+		turn   int
+	}
+	byTurn := map[key]map[string][]string{}
+	for _, r := range records {
+		if r.Thermal == "warmup-discarded" {
+			continue
+		}
+		k := key{r.PromptLayout, r.TurnIndex}
+		if byTurn[k] == nil {
+			byTurn[k] = map[string][]string{}
+		}
+		byTurn[k][r.PromptSHA256] = append(byTurn[k][r.PromptSHA256], r.Engine)
+	}
+	var out []string
+	for k, hashes := range byTurn {
+		if len(hashes) <= 1 {
+			continue
+		}
+		var lines []string
+		for h, engines := range hashes {
+			lines = append(lines, fmt.Sprintf("%s -> %s", h[:12], strings.Join(engines, ", ")))
+		}
+		sort.Strings(lines)
+		out = append(out, fmt.Sprintf("layout %s turn %d: %s", k.layout, k.turn, strings.Join(lines, " / ")))
+	}
+	sort.Strings(out)
 	return out
 }
