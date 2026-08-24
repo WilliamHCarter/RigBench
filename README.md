@@ -15,7 +15,12 @@ wins on the benchmark while meeting the benchmark's quality gates.
 |---|---|
 | v0.1 — single-call runner + cold builder fixture | complete, acceptance gate green |
 | v0.2 — multi-turn builder replay + prefix layout | complete, acceptance gate green |
+| v0.2.1 — review fixes: executable engine identity | complete |
 | v0.3 and later | not started |
+
+Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
+Step 0 of that runbook is mandatory: the Hipfire preparation script is
+transcribed from review and unverified from this workstation.
 
 ## Quick start
 
@@ -37,10 +42,13 @@ Just one slice's gate:
 go run ./cmd/agentbench smoke -slice v0.2
 ```
 
-Run against a real endpoint:
+Run against a real endpoint. `-before-engine` is not optional for an A/B: an
+OpenAI-compatible request cannot select a speculation mode, so without it two
+configs sent to one daemon produce two differently *labelled* rows from one
+actual configuration.
 
 ```bash
-go run ./cmd/agentbench run -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://rig:8080/v1 -thermal cold -verify-fixture
+go run ./cmd/agentbench run -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -warmup 1 -repeats 3
 ```
 
 Replay the four-turn builder trajectory instead of a single turn:
@@ -88,6 +96,13 @@ runs/<run-id>/               volatile output; never embedded into a prompt
   verified to be a digest of a real byte prefix. A layout A/B is required to be a
   pure reordering of identical bytes, so a "cache-friendly" layout cannot win by
   quietly rewording the prompt.
+- **Engine identity is produced and checked, not asserted.** A preparation hook
+  owns server lifecycle and an identity probe verifies it; rows from a run with
+  neither are marked *asserted* and the summary says the labels may all describe
+  one configuration.
+- **`thinking: off` must say how.** Omitting a reasoning field does not disable
+  reasoning, so a config claiming no-think has to name the mechanism, and the
+  acceptance gate checks the sent bytes against a negative control.
 - **A replay turn carries no verdict.** A four-turn replay judges its scored turn
   and records the rest as context-growth measurements. They are never counted as
   failures.
@@ -123,7 +138,8 @@ story could reuse from the first:
 | `builder-cache-friendly` | 27,191 B | 69% | 27,136 B (98%) |
 | `builder-current` | 1,552 B | 4% | 1,536 B (6%) |
 
-Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md).
+Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
+[docs/v0.2.1.md](docs/v0.2.1.md).
 
 ## Toolchain
 

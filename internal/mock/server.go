@@ -93,8 +93,10 @@ type wireRequest struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
-	Stream        bool `json:"stream"`
-	StreamOptions *struct {
+	Stream             bool           `json:"stream"`
+	ReasoningEffort    string         `json:"reasoning_effort"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs"`
+	StreamOptions      *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
 	MaxTokens int `json:"max_tokens"`
@@ -170,6 +172,16 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 	visible, reasoning := "", ""
 	if s.Respond != nil {
 		visible, reasoning = s.Respond(promptTokens)
+	}
+
+	// Reasoning is emitted unless the request actually asked for it to stop.
+	// A server that silently produced no reasoning would make a broken
+	// "thinking: off" config look correct, so the mock behaves like a model
+	// whose default is to think.
+	if !thinkingDisabled(req) {
+		reasoning = defaultReasoning
+	} else {
+		reasoning = ""
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -268,6 +280,27 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+// defaultReasoning is what the mock emits when nothing disabled thinking. Its
+// content does not matter; that it is non-empty does.
+const defaultReasoning = "Let me work through the seam. FrameRange is half-open, " +
+	"so the forward path must stop before end and the reverse path must not " +
+	"step below start. Tone is cold state, so the coefficient resolves at " +
+	"note-on and the frame loop reads only Hot.filter_coeff."
+
+// thinkingDisabled reports whether the request carried a real no-think switch.
+// Omitting a reasoning field is not one of them.
+func thinkingDisabled(req wireRequest) bool {
+	if req.ReasoningEffort == "none" {
+		return true
+	}
+	if v, ok := req.ChatTemplateKwargs["enable_thinking"]; ok {
+		if b, ok := v.(bool); ok && !b {
+			return true
+		}
+	}
+	return false
 }
 
 func writeChunk(w http.ResponseWriter, f http.Flusher, v any) {

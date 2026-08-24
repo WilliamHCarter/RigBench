@@ -249,10 +249,60 @@ type Engine struct {
 	// free of endpoint-specific knowledge.
 	Headers map[string]string `json:"headers,omitempty"`
 
+	// ExtraBody is merged into the request body verbatim. It is the escape
+	// hatch for a backend-specific field the portable schema does not model.
+	// Keys that collide with a field the client already sets are refused at
+	// load time rather than silently winning.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
+
+	// IdentityProbe optionally verifies that the server is actually running the
+	// configuration this file claims. Without it, `speculation_mode` and friends
+	// are metadata the benchmark asserts and has not checked -- and a row
+	// labelled `ar` against a daemon left in speculation mode is worse than no
+	// row at all.
+	IdentityProbe *IdentityProbe `json:"identity_probe,omitempty"`
+
 	Sampling Sampling `json:"sampling"`
 
 	NonDefaultKnobs map[string]string `json:"non_default_knobs,omitempty"`
 }
+
+// IdentityProbe is a GET against the endpoint host whose JSON response is
+// stored as a run artifact and, optionally, asserted against.
+type IdentityProbe struct {
+	// Path is resolved against the endpoint's scheme and host, not against the
+	// endpoint path: a health route usually sits outside /v1.
+	Path string `json:"path"`
+	// Require maps a dotted JSON path to the value it must have. A mismatch
+	// aborts the run; there is no warn-and-continue, because the whole point is
+	// to stop a mislabelled row from being recorded.
+	Require map[string]string `json:"require,omitempty"`
+	// Record maps a dotted JSON path to an engine-identity field name
+	// ("engine_commit", "model_hash", "draft_hash"). Values found there are
+	// recorded in run.json, which is how reproducibility identity stops being
+	// something a human has to remember to paste in.
+	Record map[string]string `json:"record,omitempty"`
+}
+
+// ThinkingOffMechanism names how "no thinking" is actually requested.
+//
+// This exists because omitting a reasoning parameter is *not* the same as
+// disabling reasoning, and a config that says "off" while the model still
+// reasons contaminates both the timing and the derived decode rate. The
+// mechanism must be stated, the same way the reasoning budget itself must be.
+type ThinkingOffMechanism string
+
+const (
+	// ThinkingOffOmit sends no reasoning field at all. Correct only for an
+	// endpoint whose default is genuinely non-reasoning -- say so deliberately.
+	ThinkingOffOmit ThinkingOffMechanism = "omit"
+	// ThinkingOffChatTemplate sends chat_template_kwargs.enable_thinking=false,
+	// which is the hard per-request no-think switch on Hipfire and vLLM-style
+	// servers.
+	ThinkingOffChatTemplate ThinkingOffMechanism = "chat_template_kwargs"
+	// ThinkingOffReasoningEffortNone sends reasoning_effort="none".
+	ThinkingOffReasoningEffortNone ThinkingOffMechanism = "reasoning_effort_none"
+)
 
 type Sampling struct {
 	Temperature float64  `json:"temperature"`
@@ -261,8 +311,11 @@ type Sampling struct {
 	Seed        *int     `json:"seed,omitempty"`
 	// Thinking is recorded explicitly. Two runs with different reasoning
 	// budgets are different variants and the reporter refuses to merge them.
-	Thinking             string `json:"thinking"`
-	ThinkingBudgetTokens *int   `json:"thinking_budget_tokens,omitempty"`
+	Thinking string `json:"thinking"`
+	// ThinkingOffMechanism is required whenever Thinking is "off". See the type:
+	// omitting a reasoning parameter is not the same as disabling reasoning.
+	ThinkingOffMechanism ThinkingOffMechanism `json:"thinking_off_mechanism,omitempty"`
+	ThinkingBudgetTokens *int                 `json:"thinking_budget_tokens,omitempty"`
 }
 
 func LoadEngine(path string) (*Engine, error) {
@@ -283,7 +336,43 @@ func LoadEngine(path string) (*Engine, error) {
 		return nil, fmt.Errorf("engine %s: sampling.thinking must be stated explicitly, "+
 			"even if it is \"off\"; an unrecorded reasoning budget makes runs incomparable", path)
 	}
+	if e.Sampling.Thinking == "off" {
+		switch e.Sampling.ThinkingOffMechanism {
+		case ThinkingOffOmit, ThinkingOffChatTemplate, ThinkingOffReasoningEffortNone:
+		case "":
+			return nil, fmt.Errorf("engine %s: sampling.thinking is \"off\" but "+
+				"sampling.thinking_off_mechanism is not set. Omitting a reasoning "+
+				"parameter is not the same as disabling reasoning: state %q, %q or %q "+
+				"so the claim is something the request actually makes",
+				path, ThinkingOffChatTemplate, ThinkingOffReasoningEffortNone, ThinkingOffOmit)
+		default:
+			return nil, fmt.Errorf("engine %s: unknown thinking_off_mechanism %q",
+				path, e.Sampling.ThinkingOffMechanism)
+		}
+	} else if e.Sampling.ThinkingOffMechanism != "" {
+		return nil, fmt.Errorf("engine %s: thinking_off_mechanism is set but thinking is %q, "+
+			"not \"off\"", path, e.Sampling.Thinking)
+	}
+	for k := range e.ExtraBody {
+		if reservedBodyKeys[k] {
+			return nil, fmt.Errorf("engine %s: extra_body may not set %q, which the client "+
+				"already sends; a silent override would make the recorded request a fiction",
+				path, k)
+		}
+	}
+	if p := e.IdentityProbe; p != nil && p.Path == "" {
+		return nil, fmt.Errorf("engine %s: identity_probe needs a path", path)
+	}
 	return &e, nil
+}
+
+// reservedBodyKeys are the request fields the client owns. ExtraBody may not
+// collide with them.
+var reservedBodyKeys = map[string]bool{
+	"model": true, "messages": true, "temperature": true, "max_tokens": true,
+	"stream": true, "stream_options": true, "seed": true, "top_p": true,
+	"tools": true, "reasoning_effort": true, "chat_template_kwargs": true,
+	"max_reasoning_tokens": true,
 }
 
 // --- layout --------------------------------------------------------------

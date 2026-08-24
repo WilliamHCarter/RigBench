@@ -37,6 +37,7 @@ type runFlags struct {
 	repeats       int
 	turns         bool
 	warmup        int
+	beforeEngine  string
 	verifyFixture bool
 	caveats       []string
 	// layoutRows, when set, is rendered as the summary's layout A/B section.
@@ -68,6 +69,13 @@ func cmdRun(args []string) error {
 		"discarded priming requests sent before the first measured turn. This is the "+
 			"resident-server warm protocol: warm is produced deliberately and recorded, "+
 			"never inferred from elapsed time.")
+	fs.StringVar(&rf.beforeEngine, "before-engine", "",
+		"script invoked as `<script> <engine-name>` before each engine's requests. It "+
+			"owns all server lifecycle -- stopping, reconfiguring, restarting and waiting "+
+			"for readiness -- because an OpenAI-compatible request cannot select a "+
+			"speculation mode or a KV quantization. Without it, two engine configs sent "+
+			"to one running daemon produce two differently labelled rows from one actual "+
+			"configuration. Its stdout and stderr are kept as run artifacts.")
 	fs.BoolVar(&rf.verifyFixture, "verify-fixture", false,
 		"run the fixture's anti-vacuity controls first and refuse to run if any is broken")
 	fs.Parse(args)
@@ -159,17 +167,21 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		Thermal:      rf.thermal,
 		WarmupPolicy: warmupPolicy(rf, traj),
 	}
+	engineIdentity := map[string]*metrics.EngineIdentity{}
 	for _, e := range engines {
 		ep := e.Endpoint
 		if rf.endpoint != "" {
 			ep = rf.endpoint
 		}
-		run.Engines = append(run.Engines, metrics.EngineIdentity{
+		id := &metrics.EngineIdentity{
 			Name: e.Name, Endpoint: ep, Model: e.Model,
 			EngineCommit: e.EngineCommit, ModelHash: e.ModelHash, DraftHash: e.DraftHash,
 			TargetQuant: e.TargetQuant, KVMode: e.KVMode, SpeculationMode: e.SpeculationMode,
 			NonDefaultKnobs: e.NonDefaultKnobs, TelemetryAdapter: e.TelemetryAdapter,
-		})
+			AttestationMethod: "unattested: the config's engine state was asserted, not produced or checked",
+		}
+		engineIdentity[e.Name] = id
+		run.Engines = append(run.Engines, *id)
 	}
 
 	// Optional fixture verification, before any completion is spent.
@@ -227,6 +239,31 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 				if err := rf.preEngine(e.Name); err != nil {
 					return "", fmt.Errorf("engine %s: preparing a %s start: %w",
 						e.Name, rf.thermal, err)
+				}
+			}
+
+			// Produce and check the engine state this row will be labelled with,
+			// before anything is measured. Done once per engine rather than per
+			// repetition: a hook that restarts a server would otherwise turn
+			// every steady-state repeat back into a cold one.
+			if rep == 0 && (rf.beforeEngine != "" || e.IdentityProbe != nil) {
+				ep := e.Endpoint
+				if rf.endpoint != "" {
+					ep = rf.endpoint
+				}
+				att, err := prepareEngine(ctx, e, rf.beforeEngine, ep, runDir, f.CommandTimeout())
+				if err != nil {
+					return "", err
+				}
+				applyAttestation(engineIdentity[e.Name], att)
+				fmt.Printf("   identity: %s\n", att.Method)
+				for i := range run.Engines {
+					if run.Engines[i].Name == e.Name {
+						run.Engines[i] = *engineIdentity[e.Name]
+					}
+				}
+				if err := run.Save(filepath.Join(runDir, "run.json")); err != nil {
+					return "", err
 				}
 			}
 
@@ -290,6 +327,16 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	if rf.endpoint != "" {
 		caveats = append(caveats, fmt.Sprintf(
 			"Every engine config was pointed at `%s`, overriding its own endpoint.", rf.endpoint))
+	}
+	if unattested := unattestedEngines(run.Engines); len(unattested) > 0 && len(engines) > 1 {
+		caveats = append(caveats, fmt.Sprintf(
+			"**Engine identity is unattested for %s.** An OpenAI-compatible request cannot "+
+				"select a speculation mode or a KV quantization, so these rows are labelled "+
+				"from their config files and not from anything this run produced or checked. "+
+				"If more than one config was sent to a single running server, the labels "+
+				"below may all describe the same actual configuration. Use `-before-engine` "+
+				"and an `identity_probe` before treating this as an A/B.",
+			"`"+strings.Join(unattested, "`, `")+"`"))
 	}
 
 	cells := report.Aggregate(records)
@@ -411,6 +458,19 @@ func mismatchedTurns(records []metrics.Record) []string {
 		}
 		sort.Strings(lines)
 		out = append(out, fmt.Sprintf("layout %s turn %d: %s", k.layout, k.turn, strings.Join(lines, " / ")))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unattestedEngines names configs whose engine state this run neither produced
+// nor verified.
+func unattestedEngines(ids []metrics.EngineIdentity) []string {
+	var out []string
+	for _, id := range ids {
+		if !id.Attested {
+			out = append(out, id.Name)
+		}
 	}
 	sort.Strings(out)
 	return out

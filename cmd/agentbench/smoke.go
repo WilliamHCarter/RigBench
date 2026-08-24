@@ -116,6 +116,12 @@ func cmdSmoke(args []string) error {
 		}
 	}
 
+	fmt.Println("== no-think is actually requested ==")
+	if err := acceptNoThink(ctx, *fixtureDir, *layout, root, *timeScale); err != nil {
+		return err
+	}
+	fmt.Println()
+
 	if *slice == "v0.2" {
 		fmt.Println("== v0.2: multi-turn replay and prefix layout ==")
 		if _, err := acceptV02(ctx, v02Options{

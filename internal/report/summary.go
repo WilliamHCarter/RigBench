@@ -186,6 +186,37 @@ func WriteSummary(path string, in SummaryInput) error {
 	}
 	w("\n")
 
+	// Engine identity: produced and checked, or merely asserted.
+	if in.Run != nil && len(in.Run.Engines) > 0 {
+		w("### Engine identity\n\n")
+		w("An OpenAI-compatible request cannot select a speculation mode, a KV ")
+		w("quantization or a draft model: those are process-level settings. A row ")
+		w("whose identity is **asserted** was labelled from a config file, not from ")
+		w("anything this run produced or verified.\n\n")
+		w("| Config | Identity | How | Engine commit | Model hash | Draft hash |\n")
+		w("|---|---|---|---|---|---|\n")
+		gaps := 0
+		for _, e := range in.Run.Engines {
+			state := "**asserted**"
+			if e.Attested {
+				state = "attested"
+			}
+			w("| `%s` | %s | %s | %s | %s | %s |\n",
+				e.Name, state, e.AttestationMethod,
+				orNotRecorded(e.EngineCommit), orNotRecorded(e.ModelHash), orNotRecorded(e.DraftHash))
+			if e.EngineCommit == "" || e.ModelHash == "" {
+				gaps++
+			}
+		}
+		w("\n")
+		if gaps > 0 {
+			w("**%d config(s) record no engine commit or model hash.** Two runs cannot be ", gaps)
+			w("compared across time without them, and a champion selected on these rows ")
+			w("could not be reproduced. Populate them in the engine config, or have an ")
+			w("`identity_probe` record them from the server.\n\n")
+		}
+	}
+
 	// --- 5. fixture self-checks -------------------------------------------
 	w("## 5. Fixture self-checks\n\n")
 	if len(in.Mutants) == 0 && len(in.Tripwires) == 0 {
@@ -317,11 +348,32 @@ func WriteSummary(path string, in SummaryInput) error {
 		if e.SpeculationMode != "" {
 			w(", speculation `%s`", e.SpeculationMode)
 		}
+		if e.Attested {
+			w(", identity attested")
+		} else {
+			w(", **identity asserted only**")
+		}
 		w("\n")
+		if e.PreparationLog != "" {
+			w("  - preparation log: `%s`\n", e.PreparationLog)
+		}
+		if e.ProbeArtifact != "" {
+			w("  - identity probe: `%s`\n", e.ProbeArtifact)
+		}
 	}
 	w("\n")
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func orNotRecorded(s string) string {
+	if s == "" {
+		return "*not recorded*"
+	}
+	if len(s) > 16 {
+		return "`" + s[:16] + "`"
+	}
+	return "`" + s + "`"
 }
 
 func qualityFails(q *metrics.Quality) []string {

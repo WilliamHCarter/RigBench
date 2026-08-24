@@ -6,7 +6,7 @@
   "model": "mock-qwen3.8-27b-fast",
   "target_quant": "MQ4R",
   "kv_mode": "Q8",
-  "speculation_mode": "dflash2",
+  "speculation_mode": "dflash",
   "telemetry_adapter": "hipfire",
   "headers": {
     "X-AgentBench-Profile": "dflash2"
@@ -14,9 +14,11 @@
   "sampling": {
     "temperature": 0,
     "max_tokens": 12288,
-    "thinking": "off"
+    "thinking": "off",
+    "thinking_off_mechanism": "chat_template_kwargs"
   },
   "non_default_knobs": {
+    "draft_arch": "DFlash2",
     "draft_precision": "F16"
   }
 }

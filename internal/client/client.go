@@ -61,12 +61,19 @@ type Request struct {
 	TopP        *float64
 	// Thinking is passed through to the engine and is always recorded, even
 	// when it is "off".
-	Thinking             string
+	Thinking string
+	// ThinkingOffMechanism decides how "off" is expressed on the wire. There is
+	// no default: omitting a reasoning parameter is not the same as disabling
+	// reasoning, and a request that quietly left the model reasoning would
+	// contaminate the timing, the token counts and the derived decode rate.
+	ThinkingOffMechanism string
 	ThinkingBudgetTokens *int
 	// Tools are included only when non-empty, and are sorted by the caller.
 	Tools []json.RawMessage
 	// Headers are extra request headers declared by the engine config.
 	Headers map[string]string
+	// ExtraBody is merged into the request body verbatim.
+	ExtraBody map[string]any
 }
 
 type Usage struct {
@@ -120,6 +127,11 @@ type Result struct {
 	// one that genuinely streams.
 	ChunkCount    int
 	StreamedBytes int
+
+	// RequestBody is the exact bytes sent. Stored as an artifact so a claim
+	// about what was requested -- no-think in particular -- is checkable after
+	// the fact rather than inferred from a config file.
+	RequestBody []byte
 }
 
 type wireRequest struct {
@@ -134,8 +146,9 @@ type wireRequest struct {
 	Tools         []json.RawMessage `json:"tools,omitempty"`
 	// Reasoning controls are non-standard across servers. The benchmark sends
 	// the one field it can record faithfully and records the mode either way.
-	ReasoningEffort    string `json:"reasoning_effort,omitempty"`
-	MaxReasoningTokens *int   `json:"max_reasoning_tokens,omitempty"`
+	ReasoningEffort    string         `json:"reasoning_effort,omitempty"`
+	MaxReasoningTokens *int           `json:"max_reasoning_tokens,omitempty"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 type streamOptions struct {
@@ -183,13 +196,31 @@ func (c *Client) Complete(ctx context.Context, req Request) *Result {
 	if req.Thinking != "" && req.Thinking != "off" {
 		wr.ReasoningEffort = req.Thinking
 	}
+	if req.Thinking == "off" {
+		switch req.ThinkingOffMechanism {
+		case "omit":
+			// Deliberately nothing. Correct only where the endpoint's default is
+			// genuinely non-reasoning, and the config had to say so.
+		case "chat_template_kwargs":
+			wr.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+		case "reasoning_effort_none":
+			wr.ReasoningEffort = "none"
+		default:
+			res.TransportStatus = metrics.TransportStreamErr
+			res.Err = fmt.Errorf("thinking is \"off\" but no mechanism was given; "+
+				"omitting a reasoning field does not disable reasoning (got %q)",
+				req.ThinkingOffMechanism)
+			return res
+		}
+	}
 
-	body, err := json.Marshal(wr)
+	body, err := encodeBody(wr, req.ExtraBody)
 	if err != nil {
 		res.TransportStatus = metrics.TransportStreamErr
 		res.Err = err
 		return res
 	}
+	res.RequestBody = body
 
 	start := time.Now()
 	var connectedAt time.Time
@@ -325,6 +356,27 @@ func (r *Result) DerivedDecodeTokS() *float64 {
 	}
 	v := float64(*r.Usage.CompletionTokens) / (window / 1000)
 	return &v
+}
+
+// encodeBody marshals the typed request and merges any engine-specific extra
+// fields. Merging happens on the decoded map so a caller cannot produce
+// malformed JSON, and reserved keys were already refused at config load.
+func encodeBody(wr wireRequest, extra map[string]any) ([]byte, error) {
+	b, err := json.Marshal(wr)
+	if err != nil {
+		return nil, err
+	}
+	if len(extra) == 0 {
+		return b, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return json.Marshal(m)
 }
 
 func msSince(t time.Time) float64 {

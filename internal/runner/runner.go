@@ -273,9 +273,16 @@ func RunTurn(ctx context.Context, o Options, t TurnOptions) (*Result, error) {
 		Seed:                 e.Sampling.Seed,
 		TopP:                 e.Sampling.TopP,
 		Thinking:             e.Sampling.Thinking,
+		ThinkingOffMechanism: string(e.Sampling.ThinkingOffMechanism),
 		ThinkingBudgetTokens: e.Sampling.ThinkingBudgetTokens,
 		Headers:              e.Headers,
+		ExtraBody:            e.ExtraBody,
 	})
+	// The exact request bytes are an artifact: a claim that a run was no-think
+	// is checkable here rather than inferred from a config file.
+	if len(res.RequestBody) > 0 {
+		_ = os.WriteFile(filepath.Join(artDir, "request.json"), res.RequestBody, 0o644)
+	}
 	_ = os.WriteFile(filepath.Join(artDir, "output.txt"), []byte(res.Visible), 0o644)
 	if res.Reasoning != "" {
 		_ = os.WriteFile(filepath.Join(artDir, "reasoning.txt"), []byte(res.Reasoning), 0o644)
@@ -341,6 +348,7 @@ func RunTurn(ctx context.Context, o Options, t TurnOptions) (*Result, error) {
 			"prompt":          filepath.ToSlash(filepath.Join("artifacts", slug, "prompt.txt")),
 			"prompt_manifest": filepath.ToSlash(filepath.Join("artifacts", slug, "prompt-manifest.json")),
 			"output":          filepath.ToSlash(filepath.Join("artifacts", slug, "output.txt")),
+			"request_body":    filepath.ToSlash(filepath.Join("artifacts", slug, "request.json")),
 		},
 	}
 	if res.Usage != nil {

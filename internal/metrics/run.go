@@ -57,6 +57,17 @@ type EngineIdentity struct {
 	SpeculationMode  string            `json:"speculation_mode,omitempty"`
 	NonDefaultKnobs  map[string]string `json:"non_default_knobs,omitempty"`
 	TelemetryAdapter string            `json:"telemetry_adapter"`
+
+	// Attested records whether this run *produced* the engine state it claims,
+	// or merely asserted it. An OpenAI-compatible request cannot select a
+	// speculation mode or a KV quantization: those are process-level settings,
+	// so two configs sent to one already-running daemon yield two differently
+	// labelled rows from one actual configuration. Attested is false for such a
+	// run, and the summary says so rather than presenting the labels as facts.
+	Attested          bool   `json:"attested"`
+	AttestationMethod string `json:"attestation_method"`
+	PreparationLog    string `json:"preparation_log,omitempty"`
+	ProbeArtifact     string `json:"probe_artifact,omitempty"`
 }
 
 type HostIdentity struct {

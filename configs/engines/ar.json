@@ -1,16 +1,28 @@
 {
   "schema": "agentbench/engine/v1",
   "name": "ar",
-  "description": "Autoregressive baseline. The reference row every speculation candidate is compared against.",
-  "endpoint": "http://127.0.0.1:8080/v1",
-  "model": "qwen3.8-27b-fast",
+  "description": "Autoregressive baseline. The reference row every speculation candidate is compared against. Requires -before-engine: speculation is a Hipfire process-level setting and cannot be selected by an OpenAI-compatible request.",
+  "endpoint": "http://127.0.0.1:11435/v1",
+  "model": "qwen3.8:27b-fast",
   "target_quant": "MQ4R",
   "kv_mode": "Q8",
   "speculation_mode": "off",
-  "telemetry_adapter": "generic",
+  "telemetry_adapter": "hipfire",
+  "identity_probe": {
+    "path": "/health",
+    "require": {
+      "model": "qwen3.8:27b-fast"
+    },
+    "record": {
+      "version": "engine_commit",
+      "model_hash": "model_hash",
+      "draft_model": "draft_hash"
+    }
+  },
   "sampling": {
     "temperature": 0,
     "max_tokens": 12288,
-    "thinking": "off"
+    "thinking": "off",
+    "thinking_off_mechanism": "chat_template_kwargs"
   }
 }
