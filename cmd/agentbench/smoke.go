@@ -84,7 +84,7 @@ func cmdSmoke(args []string) error {
 		return err
 	}
 
-	fmt.Printf("AgentBench-01 acceptance gate (%s)\n", *slice)
+	fmt.Printf("RigBench acceptance gate (%s)\n", *slice)
 	fmt.Printf("fixture %s v%s   output %s\n\n", f.ID, f.Version, root)
 
 	// --- 1. the fixture must prove itself before it measures anything ---

@@ -58,7 +58,7 @@ func WriteSummary(path string, in SummaryInput) error {
 	var b strings.Builder
 	w := func(f string, a ...any) { fmt.Fprintf(&b, f, a...) }
 
-	w("# AgentBench-01 run %s\n\n", in.Run.RunID)
+	w("# RigBench run %s\n\n", in.Run.RunID)
 
 	if len(in.Caveats) > 0 {
 		w("> **Read this first**\n>\n")

@@ -1,4 +1,4 @@
-// Command agentbench is the AgentBench-01 runner.
+// Command agentbench is the RigBench runner.
 //
 // Subcommands:
 //
@@ -14,7 +14,7 @@ import (
 	"os"
 )
 
-const usage = `agentbench — AgentBench-01 runner
+const usage = `agentbench — RigBench runner
 
 usage:
   agentbench verify-fixture [flags]   prove the fixture's anti-vacuity controls fire

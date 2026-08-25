@@ -1,4 +1,4 @@
-# AgentBench-01
+# RigBench
 
 An engine-agnostic benchmark that predicts the wall-clock speed and quality of a
 PM → builder → reviewer coding workflow, and is used to select the fastest local
@@ -8,6 +8,23 @@ inference configuration that preserves implementation and review quality.
 prefix-cache reuse, speculation acceptance and GPU utilization are explanatory.
 They are not the optimization target, and no configuration is "better" unless it
 wins on the benchmark while meeting the benchmark's quality gates.
+
+## Naming
+
+The project is **RigBench**. Three lowercase identifiers deliberately keep the
+older `agentbench` spelling, and are not inconsistencies to tidy up:
+
+| Identifier | Example | Why it stays |
+|---|---|---|
+| the CLI | `go run ./cmd/agentbench` | the binary name; renaming it invalidates every command in every runbook and slice record, for no gain |
+| record schemas | `agentbench/story/v1` | `metrics.ReadRecords` refuses rows whose schema string does not match, so renaming makes every archived `request.jsonl` unreadable |
+| hook environment | `AGENTBENCH_KNOB_KV_DTYPE` | the contract with `scripts/prepare-hipfire.sh` and with any hook an operator has written |
+
+Three comments inside `fixtures/zig-playback-v1/` also still say `AgentBench-01`.
+Those files are covered by the fixture manifest hash, so editing them moves that
+hash and marks every archived result incomparable — over three comments. The hash
+is supposed to move when the fixture meaningfully changes, and a rename is not
+one; they stay until a change lands that earns a version bump.
 
 ## Status
 

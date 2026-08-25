@@ -151,7 +151,7 @@ func Stage(ctx context.Context, f *config.Fixture, dir string, withReference boo
 	for _, argv := range [][]string{
 		{"git", "init", "--quiet", "-b", "fixture"},
 		{"git", "config", "user.email", "agentbench@localhost"},
-		{"git", "config", "user.name", "AgentBench"},
+		{"git", "config", "user.name", "RigBench"},
 		{"git", "config", "core.autocrlf", "false"},
 		{"git", "add", "-A"},
 		{"git", "commit", "--quiet", "-m", "frozen fixture HEAD"},
@@ -183,7 +183,7 @@ func writeGitExclude(dir string) error {
 	if err := os.MkdirAll(info, 0o755); err != nil {
 		return err
 	}
-	const body = "# Written by AgentBench when staging this worktree.\n" +
+	const body = "# Written by RigBench when staging this worktree.\n" +
 		"# Build artifacts are not candidate changes and must not read as\n" +
 		"# out-of-scope edits when the live lane builds in place.\n" +
 		".zig-cache/\nzig-out/\n.agentbench-candidate.patch\n"

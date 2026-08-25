@@ -1,4 +1,4 @@
-# First rig campaign — runbook
+# RigBench — first rig campaign runbook
 
 The exact sequence for the first real AR-vs-DFlash campaign, in the order the
 review asked for. Nothing here has been run: no Hipfire server is reachable from
