@@ -3,7 +3,6 @@
   "id": "zig-playback-v1",
   "version": "1.0.0",
   "language": "zig",
-
   "repo_dir": "repo",
   "hidden_dir": "hidden",
   "reference_dir": "reference/tree",
@@ -13,7 +12,6 @@
   "agent_contract_file": "public/agent_contract.md",
   "objective_file": "public/objective.md",
   "trajectory_file": "trajectories/builder-4turn.json",
-
   "owned_files": [
     "src/voice/cursor.zig",
     "src/voice/cursor_test.zig",
@@ -33,28 +31,38 @@
     "products/**",
     "hidden/**"
   ],
-
   "toolchain": {
     "zig": "0.16.0"
   },
-
   "context_packs": {
     "base": "contexts/base.json"
   },
-
   "commands": {
-    "build": ["zig", "build"],
-    "visible": ["zig", "build", "test"],
-    "hidden": ["zig", "build", "test-hidden"],
-    "release": ["zig", "build", "test-release"]
+    "build": [
+      "zig",
+      "build"
+    ],
+    "visible": [
+      "zig",
+      "build",
+      "test"
+    ],
+    "hidden": [
+      "zig",
+      "build",
+      "test-hidden"
+    ],
+    "release": [
+      "zig",
+      "build",
+      "test-release"
+    ]
   },
-
   "limits": {
     "builder_max_tokens": 12288,
     "timeout_seconds": 900,
     "command_timeout_seconds": 600
   },
-
   "required_gates": [
     "patch_extracted",
     "patch_applies",
@@ -65,11 +73,32 @@
     "scope",
     "return_contract"
   ],
-
   "unmeasured": [
     "Reasoning quality. The score is the diff, the gates and the wall clock; prose is not read.",
     "Whether a per-frame computation was moved into a helper called from the frame loop. The structural control inspects only the first while-loop body inside renderBlock.",
     "Real-time safety in the sense of measured latency. The doctrine rule is checked as absence of named constructs, not as a timing bound.",
     "Anything about a second render path. The fixture has one."
-  ]
+  ],
+  "lanes": {
+    "builder-live": {
+      "description": "The canonical live workload. The model edits, the host runs the visible build and returns its exact output, the model repairs. The hidden suite stays hidden until the loop stops, and is run exactly once.",
+      "agent_contract_file": "public/agent_contract_live.md",
+      "objective_file": "public/objective-live.md",
+      "max_turns": 6,
+      "max_wall_seconds": 3600,
+      "max_tool_output_bytes": 16384,
+      "leak_hidden_after_turn": null,
+      "stop_when_discriminating_green": true
+    },
+    "builder-repair-diagnostic": {
+      "description": "A DIAGNOSTIC lane, not the canonical benchmark. After turn 0 the hidden suite's actual failure output is returned to the model, and it is asked for one bounded repair. It answers 'given exact evidence, can this model wire what it left unwired' rather than 'can this model succeed from ordinary feedback'. Never quote its numbers as a builder-live result.",
+      "agent_contract_file": "public/agent_contract_live.md",
+      "objective_file": "public/objective-live.md",
+      "max_turns": 3,
+      "max_wall_seconds": 2400,
+      "max_tool_output_bytes": 16384,
+      "leak_hidden_after_turn": 0,
+      "stop_when_discriminating_green": false
+    }
+  }
 }

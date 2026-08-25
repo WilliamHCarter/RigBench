@@ -36,6 +36,7 @@ type runFlags struct {
 	endpoint      string
 	repeats       int
 	turns         bool
+	lane          string
 	warmup        int
 	beforeEngine  string
 	allowDrift    bool
@@ -66,6 +67,9 @@ func cmdRun(args []string) error {
 	fs.IntVar(&rf.repeats, "repeats", 1, "repetitions per engine")
 	fs.BoolVar(&rf.turns, "turns", false,
 		"replay the fixture's multi-turn builder trajectory instead of a single turn")
+	fs.StringVar(&rf.lane, "lane", "",
+		"run a live edit/test/repair lane instead of a single turn or a replay "+
+			"(builder-live, builder-repair-diagnostic). Writes story.json.")
 	fs.IntVar(&rf.warmup, "warmup", 0,
 		"discarded priming requests sent before the first measured turn. This is the "+
 			"resident-server warm protocol: warm is produced deliberately and recorded, "+
@@ -139,6 +143,16 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	var traj *config.Trajectory
 	if rf.turns {
 		traj, err = f.LoadTrajectory()
+		if err != nil {
+			return "", err
+		}
+	}
+	var lane *config.Lane
+	if rf.lane != "" {
+		if rf.turns {
+			return "", fmt.Errorf("-lane and -turns are different workloads; pick one")
+		}
+		lane, err = f.LoadLane(rf.lane)
 		if err != nil {
 			return "", err
 		}
@@ -243,6 +257,7 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	defer w.Close()
 
 	var records []metrics.Record
+	var stories []*metrics.Story
 	// One prompt hash is expected across engines: the same frozen task, byte
 	// for byte. Checked, because that is the whole basis of the comparison.
 	promptHashes := map[string][]string{}
@@ -333,9 +348,33 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			if rf.repeats > 1 {
 				label = fmt.Sprintf("%s rep %d/%d", e.Name, st.Rep+1, rf.repeats)
 			}
-			fmt.Printf("-> %s (%s, %s, %s)\n", label, layout.ID, rf.contextPack, rf.thermal)
+			workload := layout.ID
+			if lane != nil {
+				workload = rf.lane + ", " + layout.ID
+			}
+			fmt.Printf("-> %s (%s, %s, %s)\n", label, workload, rf.contextPack, rf.thermal)
 
 			opts := optsFor(e)
+			opts.Repetition = st.Rep
+
+			if lane != nil {
+				lr, lerr := runner.RunLive(ctx, runner.LiveOptions{
+					Options: opts, LaneName: rf.lane, Lane: lane,
+				})
+				if lerr != nil {
+					return "", fmt.Errorf("engine %s: %w", e.Name, lerr)
+				}
+				for _, r := range lr.Records {
+					if err := w.Write(r); err != nil {
+						return "", err
+					}
+					records = append(records, *r)
+				}
+				stories = append(stories, lr.Story)
+				printStory(lr.Story)
+				fmt.Println()
+				continue
+			}
 			var results []*runner.Result
 			if traj != nil {
 				results, err = runner.RunTrajectory(ctx, opts)
@@ -369,13 +408,26 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	// Engines being compared must have received identical prompt bytes at the
 	// same turn index. Across turns the bytes legitimately differ -- that is the
 	// point of a multi-turn replay -- so the check is per turn.
-	if bad := mismatchedTurns(records); len(bad) > 0 {
+	if bad := mismatchedTurns(records); len(bad) > 0 && lane == nil {
 		caveats = append(caveats, "**The compared configs did not receive the same prompt bytes**: "+
 			strings.Join(bad, "; ")+". The comparison is not valid.")
 	}
 	if rf.endpoint != "" {
 		caveats = append(caveats, fmt.Sprintf(
 			"Every engine config was pointed at `%s`, overriding its own endpoint.", rf.endpoint))
+	}
+	if lane != nil {
+		caveats = append(caveats, "This is a **live** lane: the model's own output becomes the "+
+			"next prompt, so two engines legitimately diverge after turn 0 and their prompt "+
+			"hashes are not expected to match. Prompt-hash equality is checked only for the "+
+			"replay lanes, where it is a validity condition.")
+		if lane.LeakHiddenAfterTurn != nil {
+			caveats = append(caveats, fmt.Sprintf(
+				"**Diagnostic lane.** The hidden invariant suite's real failure output was "+
+					"returned to the model after turn %d. These stories are not comparable "+
+					"with `builder-live` and must never be quoted as one.",
+				*lane.LeakHiddenAfterTurn))
+		}
 	}
 	if f.Toolchain.Zig != "" && zigActual != f.Toolchain.Zig {
 		caveats = append(caveats, fmt.Sprintf(
@@ -395,6 +447,13 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			"`"+strings.Join(unattested, "`, `")+"`"))
 	}
 
+	if len(stories) > 0 {
+		if err := metrics.SaveStories(filepath.Join(runDir, "story.json"), stories); err != nil {
+			return "", err
+		}
+		fmt.Printf("wrote %s\n", filepath.Join(runDir, "story.json"))
+	}
+
 	cells := report.Aggregate(records)
 	if err := report.WriteCSV(filepath.Join(runDir, "summary.csv"), cells); err != nil {
 		return "", err
@@ -404,6 +463,7 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		Mutants: mutants, Tripwires: tripwires,
 		Unmeasured: f.Unmeasured, Caveats: caveats,
 		LayoutComparison: rf.layoutRows,
+		Stories:          stories,
 	}); err != nil {
 		return "", err
 	}
@@ -542,4 +602,42 @@ func unattestedEngines(ids []metrics.EngineIdentity) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// printStory renders a completed live story on the terminal, verdict first.
+func printStory(s *metrics.Story) {
+	verdict := "FAIL"
+	if s.HiddenGreen {
+		verdict = "HIDDEN-GREEN"
+	}
+	fmt.Printf("   %s  %s\n", verdict, s.StopReason)
+	fmt.Printf("   %d turn(s)  total %.1fs = model %.1fs + tool %.1fs  "+
+		"%d patch attempt(s), %d failed apply\n",
+		s.ModelTurns, s.TotalWallMS/1000, s.ModelWallMS/1000, s.ToolWallMS/1000,
+		s.PatchAttempts, s.FailedApplyAttempts)
+	fmt.Printf("   first compile: %s   discriminating green: %s   hidden green: %s\n",
+		milestone(s.TimeToFirstCompilingPatchMS, s.TurnAtFirstCompile),
+		milestone(s.TimeToDiscriminatingGreenMS, s.TurnAtDiscriminatingGreen),
+		milestone(s.TimeToHiddenGreenMS, nil))
+	for _, g := range s.FinalGates {
+		mark := map[metrics.GateResult]string{
+			metrics.GatePass: "pass", metrics.GateFail: "FAIL", metrics.GateSkipped: "skip",
+		}[g.Result]
+		detail := g.Detail
+		if len(detail) > 90 {
+			detail = detail[:90] + "..."
+		}
+		fmt.Printf("     %-4s %-30s %s\n", mark, g.Name, detail)
+	}
+}
+
+// milestone renders a never-reached milestone as "never", not as zero.
+func milestone(ms *float64, turn *int) string {
+	if ms == nil {
+		return "never"
+	}
+	if turn != nil {
+		return fmt.Sprintf("%.1fs (t%d)", *ms/1000, *turn)
+	}
+	return fmt.Sprintf("%.1fs", *ms/1000)
 }

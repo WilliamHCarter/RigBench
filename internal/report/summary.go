@@ -33,6 +33,9 @@ type SummaryInput struct {
 	// LayoutComparison is populated when a run measured more than one prompt
 	// layout over the same content.
 	LayoutComparison []LayoutRow
+
+	// Stories is populated for live lanes.
+	Stories []*metrics.Story
 }
 
 // LayoutRow is one layout's reusable-prefix result in an A/B.
@@ -63,6 +66,11 @@ func WriteSummary(path string, in SummaryInput) error {
 			w("> - %s\n", c)
 		}
 		w("\n")
+	}
+
+	// --- 0. the north star, when there is one ------------------------------
+	if len(in.Stories) > 0 {
+		writeStories(&b, in.Stories)
 	}
 
 	// --- 1. quality first --------------------------------------------------
@@ -364,6 +372,117 @@ func WriteSummary(path string, in SummaryInput) error {
 	w("\n")
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// writeStories renders the north-star section.
+//
+// Seconds per hidden-green Story leads, because that is the metric this
+// benchmark optimizes. Decode throughput appears far below, as explanation.
+func writeStories(b *strings.Builder, stories []*metrics.Story) {
+	w := func(f string, a ...any) { fmt.Fprintf(b, f, a...) }
+
+	w("## 0. Stories\n\n")
+	w("**Seconds per hidden-green Story is the metric.** A story is green only when ")
+	w("the hidden invariant suite passes on a tree that also built, kept scope, and ")
+	w("whose own tests go red against the frozen HEAD. Nothing below is a success ")
+	w("because it was fast.\n\n")
+
+	// Group by engine and lane; a diagnostic lane never merges with a canonical one.
+	type key struct{ engine, lane string }
+	order := []key{}
+	groups := map[key][]*metrics.Story{}
+	for _, s := range stories {
+		k := key{s.Engine, s.Lane}
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], s)
+	}
+
+	w("| Engine | Lane | n | Green | Median total s | model s | tool s | Median turns |\n")
+	w("|---|---|---|---|---|---|---|---|\n")
+	for _, k := range order {
+		g := groups[k]
+		green := 0
+		var totals, models, tools, turns []float64
+		for _, s := range g {
+			if s.HiddenGreen {
+				green++
+				// Only green stories contribute to the north-star time. A fast
+				// failure is not a fast story.
+				totals = append(totals, s.TotalWallMS/1000)
+				models = append(models, s.ModelWallMS/1000)
+				tools = append(tools, s.ToolWallMS/1000)
+				turns = append(turns, float64(s.ModelTurns))
+			}
+		}
+		lane := k.lane
+		if g[0].HiddenLeakedAfterTurn != nil {
+			lane += " **(diagnostic)**"
+		}
+		w("| `%s` | %s | %d | %d/%d | %s | %s | %s | %s |\n",
+			k.engine, lane, len(g), green, len(g),
+			stat(totals, 0), stat(models, 0), stat(tools, 0), stat(turns, 0))
+	}
+	w("\nMedians cover **green stories only**: a story that failed fast is not a fast ")
+	w("story, and averaging it in would reward giving up.\n\n")
+
+	w("| Engine | Lane | Rep | Green | Stop reason | Turns | Total s | 1st compile | Discriminating | Patches | Failed applies |\n")
+	w("|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, s := range stories {
+		green := "no"
+		if s.HiddenGreen {
+			green = "**yes**"
+		}
+		w("| `%s` | %s | %d | %s | %s | %d | %.1f | %s | %s | %d | %d |\n",
+			s.Engine, s.Lane, s.Repetition, green, s.StopReason, s.ModelTurns,
+			s.TotalWallMS/1000,
+			milestoneCell(s.TimeToFirstCompilingPatchMS, s.TurnAtFirstCompile),
+			milestoneCell(s.TimeToDiscriminatingGreenMS, s.TurnAtDiscriminatingGreen),
+			s.PatchAttempts, s.FailedApplyAttempts)
+	}
+	w("\n`never` is not zero: a story that never compiled and one that compiled ")
+	w("immediately are different results. **Discriminating** is the first turn at which ")
+	w("the visible rung *and* the candidate-test discrimination gate both pass -- ")
+	w("deliberately not \"visible green\", which a patch implementing nothing also ")
+	w("achieves.\n\n")
+
+	// Per-turn detail for the stories worth reading closely.
+	for _, s := range stories {
+		if len(s.Turns) == 0 {
+			continue
+		}
+		w("<details><summary><code>%s</code> / %s / rep %d — %d turns, %s</summary>\n\n",
+			s.Engine, s.Lane, s.Repetition, s.ModelTurns, s.StopReason)
+		w("| Turn | model s | tool s | Prompt B | Output B | Patch B | Applied | Failing gates |\n")
+		w("|---|---|---|---|---|---|---|---|\n")
+		for _, t := range s.Turns {
+			var bad []string
+			for _, g := range t.Gates {
+				if g.Result != metrics.GatePass {
+					bad = append(bad, fmt.Sprintf("`%s=%s`", g.Name, g.Result))
+				}
+			}
+			if len(bad) == 0 {
+				bad = []string{"—"}
+			}
+			w("| %d | %.1f | %.1f | %d | %d | %d | %v | %s |\n",
+				t.Index, t.ModelWallMS/1000, t.ToolWallMS/1000,
+				t.PromptBytes, t.OutputBytes, t.PatchBytes, t.PatchApplied,
+				strings.Join(bad, " "))
+		}
+		w("\n</details>\n\n")
+	}
+}
+
+func milestoneCell(ms *float64, turn *int) string {
+	if ms == nil {
+		return "never"
+	}
+	if turn != nil {
+		return fmt.Sprintf("%.1fs (t%d)", *ms/1000, *turn)
+	}
+	return fmt.Sprintf("%.1fs", *ms/1000)
 }
 
 func orNotRecorded(s string) string {

@@ -55,10 +55,22 @@ var Profiles = map[string]Profile{
 	},
 }
 
+// RequestInfo is what a responder may condition on.
+//
+// AssistantTurns is derived from the request rather than from a counter on the
+// server, so a scripted multi-turn responder stays correct when several stories
+// share one mock process -- which they do, since engines are compared against
+// the same endpoint.
+type RequestInfo struct {
+	PromptTokens   int
+	AssistantTurns int
+	Model          string
+}
+
 // Responder decides what text the mock returns for a request. The runner never
 // sees how it was chosen, so the mock is a stand-in for a model and not a
 // back channel into the scoring path.
-type Responder func(promptTokens int) (visible string, reasoning string)
+type Responder func(RequestInfo) (visible string, reasoning string)
 
 type Server struct {
 	// ProfileFor picks a timing profile from the requested model alias or from
@@ -169,9 +181,18 @@ func (s *Server) completions(w http.ResponseWriter, r *http.Request) {
 		missTokens = promptTokens - hitTokens
 	}
 
+	assistantTurns := 0
+	for _, m := range req.Messages {
+		if m.Role == "assistant" {
+			assistantTurns++
+		}
+	}
+
 	visible, reasoning := "", ""
 	if s.Respond != nil {
-		visible, reasoning = s.Respond(promptTokens)
+		visible, reasoning = s.Respond(RequestInfo{
+			PromptTokens: promptTokens, AssistantTurns: assistantTurns, Model: req.Model,
+		})
 	}
 
 	// Reasoning is emitted unless the request actually asked for it to stop.

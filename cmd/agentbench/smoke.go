@@ -64,12 +64,12 @@ func cmdSmoke(args []string) error {
 		"mock delay multiplier; the acceptance gate is about gates, not speed")
 	skipVerify := fs.Bool("skip-verify", false, "skip the fixture control set (not recommended)")
 	only := fs.String("only", "", "comma-separated variants to exercise")
-	slice := fs.String("slice", "all", "which acceptance gate to run: v0.1, v0.2 or all")
+	slice := fs.String("slice", "all", "which acceptance gate to run: v0.1, v0.2, v0.3 or all")
 	fs.Parse(args)
 	switch *slice {
-	case "v0.1", "v0.2", "all":
+	case "v0.1", "v0.2", "v0.3", "all":
 	default:
-		return fmt.Errorf("-slice must be v0.1, v0.2 or all, not %q", *slice)
+		return fmt.Errorf("-slice must be v0.1, v0.2, v0.3 or all, not %q", *slice)
 	}
 
 	ctx := context.Background()
@@ -129,6 +129,16 @@ func cmdSmoke(args []string) error {
 	}
 	fmt.Println()
 
+	if *slice == "v0.3" {
+		fmt.Println("== v0.3: live builder repair loop ==")
+		if err := acceptV03(ctx, *fixtureDir, *layout,
+			"configs/engines/mock-ar.json", root, *timeScale); err != nil {
+			return err
+		}
+		fmt.Printf("\nv0.3 acceptance gate: PASS\noutput under %s\n", root)
+		return nil
+	}
+
 	if *slice == "v0.2" {
 		fmt.Println("== v0.2: multi-turn replay and prefix layout ==")
 		if _, err := acceptV02(ctx, v02Options{
@@ -180,7 +190,7 @@ func cmdSmoke(args []string) error {
 		srv := &mock.Server{
 			TimeScale:  *timeScale,
 			ProfileFor: profileFromRequest,
-			Respond:    func(int) (string, string) { return body, "" },
+			Respond:    func(mock.RequestInfo) (string, string) { return body, "" },
 		}
 		ln, shutdown, err := srv.Listen("127.0.0.1:0")
 		if err != nil {
@@ -273,6 +283,13 @@ func cmdSmoke(args []string) error {
 			return err
 		}
 		fmt.Printf("\nv0.2 acceptance gate: PASS\n")
+
+		fmt.Println("\n== v0.3: live builder repair loop ==")
+		if err := acceptV03(ctx, *fixtureDir, *layout,
+			"configs/engines/mock-ar.json", root, *timeScale); err != nil {
+			return err
+		}
+		fmt.Printf("\nv0.3 acceptance gate: PASS\n")
 	}
 
 	fmt.Printf("output under %s\n", root)

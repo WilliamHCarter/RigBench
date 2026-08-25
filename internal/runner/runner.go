@@ -52,6 +52,8 @@ type Options struct {
 	// Trajectory, when set, drives a multi-turn replay. When nil the runner
 	// sends the fixture's single turn-0 objective.
 	Trajectory *config.Trajectory
+	// Repetition is which steady-state repeat this call belongs to.
+	Repetition int
 }
 
 // Result is one completed builder request plus the paths it wrote.

@@ -49,6 +49,11 @@ type Fixture struct {
 	// results look.
 	Toolchain FixtureToolchain `json:"toolchain"`
 
+	// Lanes are the workloads this fixture supports beyond the single-turn
+	// builder. A lane names the prompt material it uses and the limits the loop
+	// runs under, so a new workload does not need a new fixture.
+	Lanes map[string]Lane `json:"lanes,omitempty"`
+
 	ContextPacks  map[string]string `json:"context_packs"`
 	Commands      Commands          `json:"commands"`
 	Limits        Limits            `json:"limits"`
@@ -63,6 +68,70 @@ type Fixture struct {
 
 type FixtureToolchain struct {
 	Zig string `json:"zig"`
+}
+
+// Lane configures one live workload.
+type Lane struct {
+	Description string `json:"description"`
+	// Prompt material. Empty falls back to the fixture-level file.
+	AgentContractFile string `json:"agent_contract_file,omitempty"`
+	ObjectiveFile     string `json:"objective_file,omitempty"`
+
+	// MaxTurns bounds the loop. A loop that hits it stops and records why; it
+	// is a benchmark result, not an error.
+	MaxTurns int `json:"max_turns"`
+	// MaxWallSeconds bounds the whole story, model and tool time together.
+	MaxWallSeconds int `json:"max_wall_seconds"`
+	// MaxToolOutputBytes truncates a build log before it enters the prompt.
+	// Real agents truncate; an untruncated failing build can be larger than the
+	// context window and would end the run for the wrong reason.
+	MaxToolOutputBytes int `json:"max_tool_output_bytes"`
+
+	// LeakHiddenAfterTurn returns the hidden suite's failure output to the model
+	// after the given turn. This is a diagnostic instrument, not the canonical
+	// benchmark: it answers "given exact evidence, can this model repair its own
+	// work" rather than "can this model succeed from ordinary feedback". Null
+	// keeps the hidden suite hidden until the loop stops.
+	LeakHiddenAfterTurn *int `json:"leak_hidden_after_turn"`
+
+	// StopWhenDiscriminatingGreen ends the loop as soon as the visible rung and
+	// the candidate-test discrimination gate both pass, without waiting for the
+	// model to say so. A model that never declares completion would otherwise
+	// burn its whole turn budget on a finished tree.
+	StopWhenDiscriminatingGreen bool `json:"stop_when_discriminating_green"`
+}
+
+func (f *Fixture) LoadLane(name string) (*Lane, error) {
+	l, ok := f.Lanes[name]
+	if !ok {
+		var known []string
+		for k := range f.Lanes {
+			known = append(known, k)
+		}
+		sort.Strings(known)
+		return nil, fmt.Errorf("fixture %s has no lane %q (has: %s)",
+			f.ID, name, strings.Join(known, ", "))
+	}
+	if l.AgentContractFile == "" {
+		l.AgentContractFile = f.AgentContractFile
+	}
+	if l.ObjectiveFile == "" {
+		l.ObjectiveFile = f.ObjectiveFile
+	}
+	if l.MaxTurns <= 0 {
+		return nil, fmt.Errorf("lane %s: max_turns must be positive; an unbounded "+
+			"repair loop has no failure mode that terminates", name)
+	}
+	if l.MaxWallSeconds <= 0 {
+		return nil, fmt.Errorf("lane %s: max_wall_seconds must be positive", name)
+	}
+	if l.MaxToolOutputBytes <= 0 {
+		l.MaxToolOutputBytes = 16384
+	}
+	if l.LeakHiddenAfterTurn != nil && *l.LeakHiddenAfterTurn < 0 {
+		return nil, fmt.Errorf("lane %s: leak_hidden_after_turn must be null or >= 0", name)
+	}
+	return &l, nil
 }
 
 type Commands struct {

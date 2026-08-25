@@ -18,6 +18,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.2.1 — review fixes: executable engine identity | complete |
 | v0.2.2 — review fixes: run schedule topology | complete |
 | v0.2.3 — gate stack controls + toolchain pin | complete |
+| v0.3 — live builder repair loop | complete, acceptance gate green |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -51,6 +52,12 @@ actual configuration.
 
 ```bash
 go run ./cmd/agentbench run -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -warmup 1 -repeats 3
+```
+
+Run the live edit/test/repair loop, which writes `story.json`:
+
+```bash
+go run ./cmd/agentbench run -lane builder-live -thermal steady -warmup 1 -repeats 3
 ```
 
 Replay the four-turn builder trajectory instead of a single turn:
@@ -105,6 +112,12 @@ runs/<run-id>/               volatile output; never embedded into a prompt
 - **`thinking: off` must say how.** Omitting a reasoning field does not disable
   reasoning, so a config claiming no-think has to name the mechanism, and the
   acceptance gate checks the sent bytes against a negative control.
+- **The benchmark never shows the model its own oracle.** In a live lane the
+  hidden suite is injected once, after the loop stops. The acceptance gate scans
+  every prompt of every turn for hidden-suite content, with the diagnostic lane
+  as its negative control.
+- **The north star is seconds per hidden-green Story**, and medians cover green
+  stories only — a story that failed fast is not a fast story.
 - **The gate stack has controls of its own.** A patch that adds one comment
   line compiles and passes the visible suite, because that suite only tests
   pre-seam behaviour. `candidate_tests_discriminate` replays the candidate's own
@@ -153,7 +166,7 @@ story could reuse from the first:
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
 [docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md),
-[docs/v0.2.3.md](docs/v0.2.3.md).
+[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md).
 
 ## Toolchain
 

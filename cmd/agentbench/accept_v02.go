@@ -244,7 +244,7 @@ func acceptV02(ctx context.Context, o v02Options) ([]report.LayoutRow, error) {
 		cache := mock.NewPrefixCache(64)
 		srv := &mock.Server{
 			TimeScale: o.timeScale, ProfileFor: profileFromRequest,
-			Respond:         func(int) (string, string) { return body, "" },
+			Respond:         func(mock.RequestInfo) (string, string) { return body, "" },
 			Cache:           cache,
 			CacheBlockBytes: 256,
 		}

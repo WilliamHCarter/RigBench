@@ -145,12 +145,38 @@ func Stage(ctx context.Context, f *config.Fixture, dir string, withReference boo
 		{"git", "add", "-A"},
 		{"git", "commit", "--quiet", "-m", "frozen fixture HEAD"},
 	} {
+		if argv[1] == "add" {
+			// Build artifacts must be invisible to git before anything is
+			// added. The live lane builds inside this worktree repeatedly, so
+			// `zig build` leaves .zig-cache/ behind and the scope gate would
+			// report thirty out-of-scope files that the candidate never wrote.
+			//
+			// Written to .git/info/exclude rather than to a .gitignore in the
+			// tree: a .gitignore would be a fixture byte the candidate could
+			// see, diff against, and be blamed for.
+			if err := writeGitExclude(dir); err != nil {
+				return nil, err
+			}
+		}
 		if r := Run(ctx, dir, argv, 2*time.Minute); !r.OK() {
 			return nil, fmt.Errorf("stage: %v failed (exit %d): %s",
 				argv, r.ExitCode, strings.TrimSpace(r.Combined()))
 		}
 	}
 	return wt, nil
+}
+
+// writeGitExclude hides build artifacts from git inside a staged worktree.
+func writeGitExclude(dir string) error {
+	info := filepath.Join(dir, ".git", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		return err
+	}
+	const body = "# Written by AgentBench when staging this worktree.\n" +
+		"# Build artifacts are not candidate changes and must not read as\n" +
+		"# out-of-scope edits when the live lane builds in place.\n" +
+		".zig-cache/\nzig-out/\n.agentbench-candidate.patch\n"
+	return os.WriteFile(filepath.Join(info, "exclude"), []byte(body), 0o644)
 }
 
 // InjectHidden replaces the placeholder hidden suite with the real one. It is a
@@ -191,6 +217,20 @@ func (w *Worktree) Reset(ctx context.Context) error {
 	}
 	if len(dirty) != 0 {
 		return fmt.Errorf("reset left %d changed files: %v", len(dirty), dirty)
+	}
+	return nil
+}
+
+// Commit records the current tree as a new baseline, so a later Diff describes
+// changes made after this point rather than since the frozen HEAD.
+func (w *Worktree) Commit(ctx context.Context, msg string) error {
+	for _, argv := range [][]string{
+		{"git", "add", "-A"},
+		{"git", "commit", "--quiet", "--allow-empty", "-m", msg},
+	} {
+		if r := Run(ctx, w.Dir, argv, 2*time.Minute); !r.OK() {
+			return fmt.Errorf("commit: %v failed: %s", argv, strings.TrimSpace(r.Combined()))
+		}
 	}
 	return nil
 }

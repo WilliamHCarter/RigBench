@@ -44,7 +44,7 @@ func acceptNoThink(ctx context.Context, fixtureDir, layout, root string, timeSca
 	run := func(engineCfg, subdir string) (metrics.Record, string, error) {
 		srv := &mock.Server{
 			TimeScale: timeScale, ProfileFor: profileFromRequest,
-			Respond: func(int) (string, string) { return body, "" },
+			Respond: func(mock.RequestInfo) (string, string) { return body, "" },
 		}
 		ln, shutdown, err := srv.Listen("127.0.0.1:0")
 		if err != nil {

@@ -24,8 +24,13 @@ const SchemaVersion = "agentbench/request/v1"
 type Lane string
 
 const (
-	LaneBuilder  Lane = "builder"
-	LaneReviewer Lane = "reviewer"
+	LaneBuilder Lane = "builder"
+	// LaneBuilderLive is the canonical live edit/test/repair workload.
+	LaneBuilderLive Lane = "builder-live"
+	// LaneBuilderRepairDiagnostic shows the model the hidden suite's failure
+	// after a turn. Diagnostic only; never comparable with builder-live.
+	LaneBuilderRepairDiagnostic Lane = "builder-repair-diagnostic"
+	LaneReviewer                Lane = "reviewer"
 )
 
 // TransportStatus separates a model that answered badly from a request that
@@ -134,6 +139,13 @@ type Record struct {
 	AppendedBytes int `json:"appended_bytes"`
 	// TurnCount is the length of the trajectory this row belongs to.
 	TurnCount int `json:"turn_count"`
+	// ToolWallMS is the host-side work this turn caused: applying the patch,
+	// building, and running tests. Kept separate from WallMS, which is the
+	// model request alone, because "the model is slow" and "the build is slow"
+	// are different problems.
+	ToolWallMS float64 `json:"tool_wall_ms"`
+	// PatchApplied is whether this turn's diff reached the working tree.
+	PatchApplied bool `json:"patch_applied"`
 	// Repetition is which steady-state repeat this row came from, 0-based.
 	// Recorded so a cell's dispersion can be traced back to individual repeats,
 	// and so a repeat that drifted can be found rather than averaged away.
