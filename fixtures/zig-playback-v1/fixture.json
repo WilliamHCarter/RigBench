@@ -34,6 +34,10 @@
     "hidden/**"
   ],
 
+  "toolchain": {
+    "zig": "0.16.0"
+  },
+
   "context_packs": {
     "base": "contexts/base.json"
   },
@@ -56,6 +60,7 @@
     "patch_applies",
     "build",
     "visible_tests",
+    "candidate_tests_discriminate",
     "hidden_tests",
     "scope",
     "return_contract"

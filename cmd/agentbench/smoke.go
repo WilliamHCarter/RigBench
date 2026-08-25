@@ -44,6 +44,13 @@ var acceptance = []expectation{
 		"a diff that does not apply cleanly is a failed gate, not a coerced apply"},
 	{mock.NoDiff, false, "patch_extracted",
 		"a confident report with no diff in it fails at extraction"},
+	{mock.Unwired, false, "candidate_tests_discriminate",
+		"a patch that adds the new files and wires them into nothing still builds and\n" +
+			"still passes the visible suite, because that suite only tests behaviour that\n" +
+			"existed before the seam. Something has to catch it."},
+	{mock.CommentOnly, false, "candidate_tests_discriminate",
+		"and so does a one-line comment. This is the control for the gate stack itself:\n" +
+			"without it, doing nothing collects six of seven gates and reads as a near miss."},
 }
 
 func cmdSmoke(args []string) error {

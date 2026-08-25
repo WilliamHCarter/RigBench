@@ -31,11 +31,21 @@ const (
 	Unapplyable Variant = "unapplyable"
 	// NoDiff is a plausible-sounding report with no diff in it at all.
 	NoDiff Variant = "no-diff"
+	// Unwired adds range.zig and tone.zig as new files with correct contents
+	// and wires neither into Cold, the cursor or the module root. This is the
+	// shape of the AR one-shot result observed on the rig: it applies, it
+	// builds, and the visible suite -- which only tests behaviour that existed
+	// before the seam -- passes.
+	Unwired Variant = "unwired"
+	// CommentOnly changes a comment in an owned file and nothing else. The
+	// least possible work that is still a valid patch.
+	CommentOnly Variant = "comment-only"
 )
 
 // AllVariants is the order the self-test exercises them in.
 var AllVariants = []Variant{
 	Reference, VisibleGreenHiddenRed, Broken, ScopeViolation, Unapplyable, NoDiff,
+	Unwired, CommentOnly,
 }
 
 // BuildResponse produces a canned candidate response for a fixture.
@@ -62,6 +72,9 @@ func BuildResponse(ctx context.Context, f *config.Fixture, v Variant, stageDir s
 // referenceDiff stages HEAD, overlays the reference solution, applies any
 // mutation the variant calls for, and returns the resulting unified diff.
 func referenceDiff(ctx context.Context, f *config.Fixture, stageDir string, v Variant) (string, error) {
+	if v == Unwired || v == CommentOnly {
+		return degenerateDiff(ctx, f, stageDir, v)
+	}
 	wt, err := executor.Stage(ctx, f, stageDir, false)
 	if err != nil {
 		return "", err
@@ -96,6 +109,47 @@ func referenceDiff(ctx context.Context, f *config.Fixture, stageDir string, v Va
 		}
 	}
 
+	return wt.Diff(ctx)
+}
+
+// degenerateDiff produces a patch that is valid, in scope, and does essentially
+// nothing.
+//
+// These exist as controls on the *gate stack*, not on the model. The hidden
+// suite has twelve mutants proving it is not vacuous; nothing was proving the
+// same of the gates above it. A patch that wires nothing must not be able to
+// collect build and visible-test passes, because a real one-shot result did
+// exactly that and read as a near miss.
+func degenerateDiff(ctx context.Context, f *config.Fixture, stageDir string, v Variant) (string, error) {
+	wt, err := executor.Stage(ctx, f, stageDir, false)
+	if err != nil {
+		return "", err
+	}
+	switch v {
+	case Unwired:
+		// New files with correct contents, wired into nothing. Nothing reaches
+		// them from the module root, so they are never even compiled.
+		for _, name := range []string{"range.zig", "tone.zig"} {
+			b, err := os.ReadFile(filepath.Join(f.Path(f.ReferenceDir), "src/voice", name))
+			if err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(wt.Dir, "src/voice", name), b, 0o644); err != nil {
+				return "", err
+			}
+		}
+	case CommentOnly:
+		path := filepath.Join(wt.Dir, "src/voice/engine.zig")
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		out := strings.Replace(string(b), "pub const flag_active: u32 = 1 << 0;",
+			"// The active flag.\npub const flag_active: u32 = 1 << 0;", 1)
+		if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+			return "", err
+		}
+	}
 	return wt.Diff(ctx)
 }
 
@@ -176,6 +230,15 @@ func reportFor(v Variant) string {
 			"the frozen value legible.\n"
 	case Unapplyable:
 		return common
+	case Unwired:
+		return "Added `src/voice/range.zig` and `src/voice/tone.zig` with the exact\n" +
+			"signatures the story specifies.\n\n" +
+			"Commands run:\n  zig build test          exit 0\n" +
+			"  zig build test-release  exit 0\n\nAll green.\n"
+	case CommentOnly:
+		return "Reviewed the seam and clarified the flag documentation.\n\n" +
+			"Commands run:\n  zig build test          exit 0\n" +
+			"  zig build test-release  exit 0\n\nAll green.\n"
 	}
 	return common
 }

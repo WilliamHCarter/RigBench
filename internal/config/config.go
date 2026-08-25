@@ -42,6 +42,13 @@ type Fixture struct {
 	OwnedFiles     []string `json:"owned_files"`
 	ForbiddenPaths []string `json:"forbidden_paths"`
 
+	// Toolchain is the exact compiler this fixture's goldens, mutant controls
+	// and hidden suite were verified under. Not a minimum: a frozen fixture's
+	// bytes are only meaningful under the compiler that produced them, and two
+	// runs on different compilers are not comparable however similar the
+	// results look.
+	Toolchain FixtureToolchain `json:"toolchain"`
+
 	ContextPacks  map[string]string `json:"context_packs"`
 	Commands      Commands          `json:"commands"`
 	Limits        Limits            `json:"limits"`
@@ -52,6 +59,10 @@ type Fixture struct {
 	Unmeasured []string `json:"unmeasured"`
 
 	dir string
+}
+
+type FixtureToolchain struct {
+	Zig string `json:"zig"`
 }
 
 type Commands struct {
@@ -277,6 +288,8 @@ type IdentityProbe struct {
 	// aborts the run; there is no warn-and-continue, because the whole point is
 	// to stop a mislabelled row from being recorded.
 	Require map[string]string `json:"require,omitempty"`
+	// Note is documentation for whoever fills Require in. It is not read.
+	Note string `json:"note,omitempty"`
 	// Record maps a dotted JSON path to an engine-identity field name
 	// ("engine_commit", "model_hash", "draft_hash"). Values found there are
 	// recorded in run.json, which is how reproducibility identity stops being

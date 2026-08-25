@@ -45,8 +45,12 @@ type engineAttestation struct {
 	PreparedLog   string
 	Probed        bool
 	ProbeArtifact string
-	Recorded      map[string]string
-	Method        string
+	// Checked is true only when the probe asserted something and the assertion
+	// held. A probe with an empty `require` block records the server's answer
+	// and verifies nothing, and must not be described as verification.
+	Checked  bool
+	Recorded map[string]string
+	Method   string
 }
 
 // prepareEngine runs the preparation hook and the identity probe for one engine.
@@ -113,15 +117,22 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 			}
 		}
 		att.Probed = true
+		att.Checked = len(e.IdentityProbe.Require) > 0
 	}
 
 	switch {
-	case att.Prepared && att.Probed:
+	case att.Prepared && att.Checked:
 		att.Method = "prepared by hook and verified by probe"
+	case att.Prepared && att.Probed:
+		att.Method = "prepared by hook; the probe recorded the server's answer but " +
+			"asserted nothing about it (identity_probe.require is empty)"
 	case att.Prepared:
-		att.Method = "prepared by hook; not verified by a probe"
-	case att.Probed:
+		att.Method = "prepared by hook; not probed"
+	case att.Checked:
 		att.Method = "verified by probe; not prepared by this run"
+	case att.Probed:
+		att.Method = "probed but not verified (identity_probe.require is empty), " +
+			"and not prepared by this run"
 	default:
 		att.Method = "unattested: the config's engine state was asserted, not produced or checked"
 	}
@@ -195,7 +206,9 @@ func lookup(doc any, path string) (string, bool) {
 // identity, so reproducibility fields stop depending on someone remembering to
 // paste a hash into a config file.
 func applyAttestation(id *metrics.EngineIdentity, att *engineAttestation) {
-	id.Attested = att.Prepared || att.Probed
+	// Attested means this run produced or checked the state, not merely that it
+	// asked. A probe that asserts nothing is a recording, not an attestation.
+	id.Attested = att.Prepared || att.Checked
 	id.AttestationMethod = att.Method
 	id.PreparationLog = att.PreparedLog
 	id.ProbeArtifact = att.ProbeArtifact

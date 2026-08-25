@@ -51,7 +51,13 @@ func cmdVerifyFixture(args []string) error {
 		return err
 	}
 	zig := executor.ZigVersion(ctx, ref)
-	fmt.Printf("zig resolved from build.zig.zon: %s\n", orUnknown(zig))
+	fmt.Printf("zig resolved from build.zig.zon: %s (fixture pins %s)\n",
+		orUnknown(zig), orUnknown(f.Toolchain.Zig))
+	if f.Toolchain.Zig != "" && zig != "" && zig != f.Toolchain.Zig {
+		fmt.Printf("\n  NOTE: verifying under a compiler the fixture was not pinned to.\n"+
+			"  If these controls pass, update fixture.json's toolchain.zig to %q\n"+
+			"  deliberately, so runs are refused against any other compiler.\n\n", zig)
+	}
 
 	refOK := true
 	for _, rung := range []struct {

@@ -17,6 +17,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.2 — multi-turn builder replay + prefix layout | complete, acceptance gate green |
 | v0.2.1 — review fixes: executable engine identity | complete |
 | v0.2.2 — review fixes: run schedule topology | complete |
+| v0.2.3 — gate stack controls + toolchain pin | complete |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -104,6 +105,13 @@ runs/<run-id>/               volatile output; never embedded into a prompt
 - **`thinking: off` must say how.** Omitting a reasoning field does not disable
   reasoning, so a config claiming no-think has to name the mechanism, and the
   acceptance gate checks the sent bytes against a negative control.
+- **The gate stack has controls of its own.** A patch that adds one comment
+  line compiles and passes the visible suite, because that suite only tests
+  pre-seam behaviour. `candidate_tests_discriminate` replays the candidate's own
+  tests against the frozen HEAD and requires them to go red, and `unwired` /
+  `comment-only` are permanent acceptance rows.
+- **The compiler is part of the fixture.** `toolchain.zig` is checked, not
+  recorded: a fixture verified under one Zig and run under another is refused.
 - **Engines are never interleaved across repetitions.** Preparation is engine
   outer, repetition inner, and warmup is once per engine — otherwise a
   `-repeats 3` A/B measures the later repeats against whichever engine was
@@ -144,7 +152,8 @@ story could reuse from the first:
 | `builder-current` | 1,552 B | 4% | 1,536 B (6%) |
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
-[docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md).
+[docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md),
+[docs/v0.2.3.md](docs/v0.2.3.md).
 
 ## Toolchain
 

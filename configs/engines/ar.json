@@ -10,14 +10,13 @@
   "telemetry_adapter": "hipfire",
   "identity_probe": {
     "path": "/health",
-    "require": {
-      "model": "qwen3.8:27b-fast"
-    },
+    "require": {},
     "record": {
       "version": "engine_commit",
       "model_hash": "model_hash",
       "draft_model": "draft_hash"
-    }
+    },
+    "note": "STEP 0 OF docs/rig-campaign.md: identity_probe.require is deliberately empty. The rig fix that split AGENTBENCH_HEALTH_MODEL from the serve alias showed that /health reports a different model name than the name used to serve, so a require block guessed from the alias would abort every run. Inspect the real /health response, then put the value it actually reports here -- and, if the build exposes a field that distinguishes AR from DFlash, put that here too. That is what turns the row label from a claim into a checked fact."
   },
   "sampling": {
     "temperature": 0,

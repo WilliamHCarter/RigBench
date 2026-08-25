@@ -38,6 +38,7 @@ type runFlags struct {
 	turns         bool
 	warmup        int
 	beforeEngine  string
+	allowDrift    bool
 	verifyFixture bool
 	caveats       []string
 	// layoutRows, when set, is rendered as the summary's layout A/B section.
@@ -69,6 +70,11 @@ func cmdRun(args []string) error {
 		"discarded priming requests sent before the first measured turn. This is the "+
 			"resident-server warm protocol: warm is produced deliberately and recorded, "+
 			"never inferred from elapsed time.")
+	fs.BoolVar(&rf.allowDrift, "allow-toolchain-drift", false,
+		"record the run even though the compiler differs from the one the fixture was "+
+			"verified under. The mismatch becomes a caveat on every row rather than an "+
+			"error; the fixture's goldens and mutant controls are not evidence under a "+
+			"compiler that did not produce them.")
 	fs.StringVar(&rf.beforeEngine, "before-engine", "",
 		"script invoked as `<script> <engine-name>` before each engine's requests. It "+
 			"owns all server lifecycle -- stopping, reconfiguring, restarting and waiting "+
@@ -125,6 +131,11 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			"-repeats 1, or declare -thermal steady with -warmup 1", rf.repeats)
 	}
 
+	zigActual, err := checkToolchain(ctx, f, rf.allowDrift)
+	if err != nil {
+		return "", err
+	}
+
 	var traj *config.Trajectory
 	if rf.turns {
 		traj, err = f.LoadTrajectory()
@@ -170,8 +181,8 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 			// Asked inside the fixture repository: under anyzig the compiler
 			// version is resolved from build.zig.zon, so a global `zig version`
 			// would answer for the wrong tree or not at all.
-			Zig:    executor.ZigVersion(ctx, f.Path(f.RepoDir)),
-			ZigPin: zigPin(f),
+			Zig:    zigActual,
+			ZigPin: f.Toolchain.Zig,
 		},
 		Thermal:      rf.thermal,
 		WarmupPolicy: warmupPolicy(rf, traj),
@@ -365,6 +376,13 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	if rf.endpoint != "" {
 		caveats = append(caveats, fmt.Sprintf(
 			"Every engine config was pointed at `%s`, overriding its own endpoint.", rf.endpoint))
+	}
+	if f.Toolchain.Zig != "" && zigActual != f.Toolchain.Zig {
+		caveats = append(caveats, fmt.Sprintf(
+			"**The fixture was verified under zig `%s` and this run used zig `%s`.** "+
+				"Its goldens, its mutant controls and its hidden suite are evidence only "+
+				"under the compiler that produced them, so every quality verdict below "+
+				"rests on an unverified toolchain.", f.Toolchain.Zig, zigActual))
 	}
 	if unattested := unattestedEngines(run.Engines); len(unattested) > 0 && len(engines) > 1 {
 		caveats = append(caveats, fmt.Sprintf(

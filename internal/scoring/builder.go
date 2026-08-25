@@ -31,6 +31,16 @@ const (
 	GateHiddenTests    = "hidden_tests"
 	GateScope          = "scope"
 	GateReturnContract = "return_contract"
+	// GateCandidateTestsDiscriminate asks of the candidate's own tests the
+	// question the fixture asks of every other check: would this fail if the
+	// body under test were emptied?
+	//
+	// It exists because the visible suite at HEAD tests only behaviour that
+	// existed before the seam. A patch that implements nothing still compiles
+	// and still passes it, so `build` and `visible_tests` cannot distinguish a
+	// real implementation from a one-line comment. Measured, not theorised: a
+	// 397-byte comment-only patch collects six of seven gates without it.
+	GateCandidateTestsDiscriminate = "candidate_tests_discriminate"
 )
 
 // BuilderInput is everything needed to score one builder response.
@@ -44,6 +54,9 @@ type BuilderInput struct {
 	// ArtifactPrefix is the run-relative prefix recorded in the Gate.Artifact
 	// field, so a report can find the log from the JSONL row.
 	ArtifactPrefix string
+	// DiscriminateDir stages a second, clean copy of the frozen HEAD for the
+	// candidate-test discrimination gate. Empty disables the gate.
+	DiscriminateDir string
 }
 
 // ScoreBuilder applies the candidate patch and runs every gate.
@@ -84,7 +97,8 @@ func ScoreBuilder(ctx context.Context, in BuilderInput) (*metrics.Quality, error
 		q.Gates = append(q.Gates, metrics.Gate{
 			Name: GatePatchExtracted, Result: metrics.GateFail, Detail: err.Error(),
 		})
-		for _, g := range []string{GatePatchApplies, GateBuild, GateVisibleTests, GateHiddenTests, GateScope} {
+		for _, g := range []string{GatePatchApplies, GateBuild, GateVisibleTests,
+			GateCandidateTestsDiscriminate, GateHiddenTests, GateScope} {
 			skip(g, "no patch to apply")
 		}
 		q.Gates = append(q.Gates, checkReturnContract(in.Output))
@@ -107,7 +121,8 @@ func ScoreBuilder(ctx context.Context, in BuilderInput) (*metrics.Quality, error
 			Detail: firstLine(ap.Combined()), Command: strings.Join(ap.Argv, " "),
 			ExitCode: metrics.Ptr(ap.ExitCode), Artifact: applyArtifact,
 		})
-		for _, g := range []string{GateBuild, GateVisibleTests, GateHiddenTests} {
+		for _, g := range []string{GateBuild, GateVisibleTests,
+			GateCandidateTestsDiscriminate, GateHiddenTests} {
 			skip(g, "patch did not apply")
 		}
 		q.Gates = append(q.Gates, scopeGate(ctx, in, nil))
@@ -138,7 +153,8 @@ func ScoreBuilder(ctx context.Context, in BuilderInput) (*metrics.Quality, error
 	bres := executor.Run(ctx, in.Worktree.Dir, in.Fixture.Commands.Build, timeout)
 	q.Gates = append(q.Gates, rungGate(GateBuild, bres, writeLog("build", bres)))
 	if !bres.OK() {
-		for _, g := range []string{GateVisibleTests, GateHiddenTests} {
+		for _, g := range []string{GateVisibleTests,
+			GateCandidateTestsDiscriminate, GateHiddenTests} {
 			skip(g, "build did not succeed")
 		}
 		q.Gates = append(q.Gates, checkReturnContract(in.Output))
@@ -154,6 +170,9 @@ func ScoreBuilder(ctx context.Context, in BuilderInput) (*metrics.Quality, error
 		vgate.Detail = strings.TrimSpace(fmt.Sprintf("%s %d tests passed", vgate.Detail, *p))
 	}
 	q.Gates = append(q.Gates, vgate)
+
+	// --- do the candidate's own tests discriminate? ---
+	q.Gates = append(q.Gates, discriminateGate(ctx, in, changed, writeLog))
 
 	// --- hidden tests ---
 	// Injected only now: the candidate never saw the oracle in the tree, and
@@ -198,6 +217,87 @@ func rungGate(name string, r *executor.CommandResult, artifact string) metrics.G
 		g.Detail = firstLine(r.Combined())
 	default:
 		g.Result = metrics.GatePass
+	}
+	return g
+}
+
+// discriminateGate replays only the candidate's *test* files against the frozen
+// HEAD, without the candidate's implementation, and requires them to go red.
+//
+// The story asks the builder to write invariant-named tests. If those tests
+// still pass against a tree in which the seam does not exist, they do not defend
+// the invariants they are named after -- and neither does the visible rung that
+// ran them. A patch that adds no test file at all fails here by definition,
+// which is the point: it is the same anti-vacuity discipline the hidden suite's
+// twelve mutants provide, turned on the candidate.
+//
+// What this does NOT prove is that the tests are *correct*, only that they are
+// load-bearing. The hidden suite still owns correctness.
+func discriminateGate(ctx context.Context, in BuilderInput, changed []string,
+	writeLog func(string, *executor.CommandResult) string) metrics.Gate {
+
+	g := metrics.Gate{Name: GateCandidateTestsDiscriminate}
+	if in.DiscriminateDir == "" {
+		g.Result = metrics.GateSkipped
+		g.Detail = "no staging directory was provided for this gate"
+		return g
+	}
+
+	var tests []string
+	for _, p := range changed {
+		if strings.HasSuffix(p, "_test.zig") && in.Fixture.Owns(p) {
+			tests = append(tests, p)
+		}
+	}
+	if len(tests) == 0 {
+		g.Result = metrics.GateFail
+		g.Detail = "the patch adds or changes no test file, so nothing it wrote " +
+			"defends the invariants the story names"
+		return g
+	}
+	sort.Strings(tests)
+
+	clean, err := executor.Stage(ctx, in.Fixture, in.DiscriminateDir, false)
+	if err != nil {
+		g.Result = metrics.GateSkipped
+		g.Detail = "could not stage a clean tree: " + err.Error()
+		return g
+	}
+	for _, rel := range tests {
+		src := filepath.Join(in.Worktree.Dir, rel)
+		b, err := os.ReadFile(src)
+		if err != nil {
+			// A deleted test file cannot be replayed. Deleting the tests that
+			// would have caught you is not a way to pass this gate.
+			g.Result = metrics.GateFail
+			g.Detail = fmt.Sprintf("%s could not be read back (deleted?): %v", rel, err)
+			return g
+		}
+		if err := os.WriteFile(filepath.Join(clean.Dir, rel), b, 0o644); err != nil {
+			g.Result = metrics.GateSkipped
+			g.Detail = err.Error()
+			return g
+		}
+	}
+
+	r := executor.Run(ctx, clean.Dir, in.Fixture.Commands.Visible, in.Fixture.CommandTimeout())
+	g.Command = strings.Join(r.Argv, " ")
+	g.ExitCode = metrics.Ptr(r.ExitCode)
+	g.Artifact = writeLog("candidate-tests-vs-head", r)
+
+	switch {
+	case r.Unavailable:
+		g.Result = metrics.GateSkipped
+		g.Detail = r.Err
+	case r.OK():
+		g.Result = metrics.GateFail
+		g.Detail = fmt.Sprintf("the candidate's %d test file(s) still pass against the "+
+			"frozen HEAD, where the seam does not exist; they do not defend the "+
+			"invariants they are named after (%s)",
+			len(tests), strings.Join(tests, ", "))
+	default:
+		g.Result = metrics.GatePass
+		g.Detail = fmt.Sprintf("%d test file(s) go red against the frozen HEAD", len(tests))
 	}
 	return g
 }

@@ -93,8 +93,20 @@ pub fn referenceDigest() RenderError![32]u8 {
 
 pub fn digestHex() RenderError![64]u8 {
     const d = try referenceDigest();
+    // Hand-rolled rather than routed through std.fmt.
+    //
+    // A frozen golden's textual form must not depend on a standard-library
+    // formatting verb: `{x}` over a byte slice and `std.fmt.fmtSliceHexLower`
+    // are each correct on one Zig release and absent or wrong on another, so
+    // either choice pins the fixture to a compiler version by accident. Sixteen
+    // characters of lookup table are portable across every release and produce
+    // exactly the same bytes.
+    const digits = "0123456789abcdef";
     var hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex, "{x}", .{std.fmt.fmtSliceHexLower(&d)}) catch unreachable;
+    for (d, 0..) |b, i| {
+        hex[i * 2] = digits[b >> 4];
+        hex[i * 2 + 1] = digits[b & 0x0f];
+    }
     return hex;
 }
 

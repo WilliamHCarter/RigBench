@@ -383,11 +383,12 @@ func RunTurn(ctx context.Context, o Options, t TurnOptions) (*Result, error) {
 		return nil, err
 	}
 	q, err := scoring.ScoreBuilder(ctx, scoring.BuilderInput{
-		Fixture:        f,
-		Worktree:       wt,
-		Output:         res.Visible,
-		ArtifactDir:    artDir,
-		ArtifactPrefix: filepath.ToSlash(filepath.Join("artifacts", slug)),
+		Fixture:         f,
+		Worktree:        wt,
+		Output:          res.Visible,
+		ArtifactDir:     artDir,
+		ArtifactPrefix:  filepath.ToSlash(filepath.Join("artifacts", slug)),
+		DiscriminateDir: filepath.Join(o.WorkDir, slug+".discriminate"),
 	})
 	if err != nil {
 		return nil, err
