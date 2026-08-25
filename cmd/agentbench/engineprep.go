@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +53,9 @@ type engineAttestation struct {
 	Checked  bool
 	Recorded map[string]string
 	Method   string
+	// KnobEnv is exactly what was handed to the hook, kept so a run's request
+	// can be compared against what the server reports it resolved to.
+	KnobEnv []string
 }
 
 // prepareEngine runs the preparation hook and the identity probe for one engine.
@@ -68,10 +73,15 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 		if err != nil {
 			return nil, err
 		}
-		r := executor.Run(ctx, ".", []string{abs, e.Name}, timeout)
+		// Every set tuning axis reaches the hook as AGENTBENCH_KNOB_*. The
+		// harness declares the axis and records what was asked for; the hook
+		// knows how to apply it. Neither needs an opinion about the value.
+		env := e.Knobs.Env()
+		r := executor.RunEnv(ctx, ".", []string{abs, e.Name}, env, timeout)
 		logPath := filepath.Join(dir, e.Name+suffix+".prepare.log")
-		body := fmt.Sprintf("$ %s %s\nexit %d  duration %s  timed_out=%v unavailable=%v\n\n%s\n",
-			abs, e.Name, r.ExitCode, r.Duration.Round(time.Millisecond),
+		body := fmt.Sprintf("$ %s %s\n(knobs: %s)\nexit %d  duration %s  timed_out=%v unavailable=%v\n\n%s\n",
+			abs, e.Name, strings.Join(env, " "),
+			r.ExitCode, r.Duration.Round(time.Millisecond),
 			r.TimedOut, r.Unavailable, r.Combined())
 		_ = os.WriteFile(logPath, []byte(body), 0o644)
 		att.PreparedLog = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+suffix+".prepare.log"))
@@ -80,6 +90,7 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 				e.Name, r.ExitCode, firstLineOf(r.Combined()), logPath)
 		}
 		att.Prepared = true
+		att.KnobEnv = env
 	}
 
 	if e.IdentityProbe != nil {
@@ -220,10 +231,8 @@ func applyAttestation(id *metrics.EngineIdentity, att *engineAttestation) {
 			id.ModelHash = val
 		case "draft_hash":
 			id.DraftHash = val
-		case "model":
-			if id.Model == "" {
-				id.Model = val
-			}
+		case "model", "resolved_model":
+			id.ResolvedModel = val
 		default:
 			if id.NonDefaultKnobs == nil {
 				id.NonDefaultKnobs = map[string]string{}
@@ -240,4 +249,51 @@ func firstLineOf(s string) string {
 		}
 	}
 	return ""
+}
+
+// hashArtifacts digests the model files an engine config names, when they are
+// readable from this host.
+//
+// A hash the harness computes beats one a human pastes into a config: the paste
+// is a snapshot of what was true when somebody last looked. When the file is not
+// readable -- the usual case for a remote rig -- the config's declared value
+// stands and is recorded as declared rather than verified.
+func hashArtifacts(id *metrics.EngineIdentity, e *config.Engine) {
+	digest := func(path string) string {
+		if path == "" {
+			return ""
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return ""
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return ""
+		}
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	if got := digest(e.Knobs.TargetFile); got != "" {
+		id.TargetSHA256 = got
+	}
+	if got := digest(e.Knobs.DraftFile); got != "" {
+		id.DraftSHA256 = got
+	}
+	// A resolved model reported by the probe never overwrites the request.
+	if id.ResolvedModel == "" {
+		if v, ok := att_recorded(id); ok {
+			id.ResolvedModel = v
+		}
+	}
+}
+
+// att_recorded pulls a resolved model out of whatever the probe recorded into
+// the identity, without inventing one.
+func att_recorded(id *metrics.EngineIdentity) (string, bool) {
+	if id.NonDefaultKnobs == nil {
+		return "", false
+	}
+	v, ok := id.NonDefaultKnobs["resolved_model"]
+	return v, ok
 }

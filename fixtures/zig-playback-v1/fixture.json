@@ -88,7 +88,12 @@
       "max_wall_seconds": 3600,
       "max_tool_output_bytes": 16384,
       "leak_hidden_after_turn": null,
-      "stop_when_discriminating_green": true
+      "stop_when_discriminating_green": true,
+      "turn_limits": {
+        "initial": 8192,
+        "repair": 4096,
+        "final": 2048
+      }
     },
     "builder-repair-diagnostic": {
       "description": "A DIAGNOSTIC lane, not the canonical benchmark. After turn 0 the hidden suite's actual failure output is returned to the model, and it is asked for one bounded repair. It answers 'given exact evidence, can this model wire what it left unwired' rather than 'can this model succeed from ordinary feedback'. Never quote its numbers as a builder-live result.",
@@ -98,7 +103,12 @@
       "max_wall_seconds": 2400,
       "max_tool_output_bytes": 16384,
       "leak_hidden_after_turn": 0,
-      "stop_when_discriminating_green": false
+      "stop_when_discriminating_green": false,
+      "turn_limits": {
+        "initial": 8192,
+        "repair": 4096,
+        "final": 2048
+      }
     }
   }
 }

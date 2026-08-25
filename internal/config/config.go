@@ -94,11 +94,59 @@ type Lane struct {
 	// keeps the hidden suite hidden until the loop stops.
 	LeakHiddenAfterTurn *int `json:"leak_hidden_after_turn"`
 
+	// TurnLimits caps generation per turn role rather than applying one global
+	// ceiling to every turn. A repair is a delta and does not need the budget
+	// an initial implementation does; a 32K cap on every turn invites the
+	// length pathology the one-shot campaign measured, where a model spent its
+	// whole budget narrating.
+	TurnLimits TurnLimits `json:"turn_limits"`
+
 	// StopWhenDiscriminatingGreen ends the loop as soon as the visible rung and
 	// the candidate-test discrimination gate both pass, without waiting for the
 	// model to say so. A model that never declares completion would otherwise
 	// burn its whole turn budget on a finished tree.
 	StopWhenDiscriminatingGreen bool `json:"stop_when_discriminating_green"`
+}
+
+// TurnLimits are per-turn generation ceilings, in tokens.
+//
+// Zero means "fall back to the engine config's max_tokens", so a lane that does
+// not care keeps working. The role a turn plays is decided by position: the
+// first turn is initial, the last permitted turn is final, everything between
+// is repair.
+type TurnLimits struct {
+	Initial int `json:"initial,omitempty"`
+	Repair  int `json:"repair,omitempty"`
+	Final   int `json:"final,omitempty"`
+}
+
+// For returns the ceiling for a turn, or 0 to use the engine default.
+func (t TurnLimits) For(turn, maxTurns int) int {
+	switch {
+	case turn == 0:
+		return t.Initial
+	case turn >= maxTurns-1:
+		// The last permitted turn gets the final budget. A model that has run
+		// out of turns should be summarizing, not starting again.
+		if t.Final != 0 {
+			return t.Final
+		}
+		return t.Repair
+	default:
+		return t.Repair
+	}
+}
+
+// Role names the budget a turn drew on, for the record.
+func (t TurnLimits) Role(turn, maxTurns int) string {
+	switch {
+	case turn == 0:
+		return "initial"
+	case turn >= maxTurns-1:
+		return "final"
+	default:
+		return "repair"
+	}
 }
 
 func (f *Fixture) LoadLane(name string) (*Lane, error) {
@@ -130,6 +178,13 @@ func (f *Fixture) LoadLane(name string) (*Lane, error) {
 	}
 	if l.LeakHiddenAfterTurn != nil && *l.LeakHiddenAfterTurn < 0 {
 		return nil, fmt.Errorf("lane %s: leak_hidden_after_turn must be null or >= 0", name)
+	}
+	for what, v := range map[string]int{
+		"initial": l.TurnLimits.Initial, "repair": l.TurnLimits.Repair, "final": l.TurnLimits.Final,
+	} {
+		if v < 0 {
+			return nil, fmt.Errorf("lane %s: turn_limits.%s is negative", name, what)
+		}
 	}
 	return &l, nil
 }
@@ -345,6 +400,14 @@ type Engine struct {
 	Sampling Sampling `json:"sampling"`
 
 	NonDefaultKnobs map[string]string `json:"non_default_knobs,omitempty"`
+
+	// Knobs are the tuning axes, as data. See knobs.go: the benchmark records
+	// them and hands them to the preparation hook; it has no opinion about
+	// which values are good and must not acquire one.
+	Knobs Knobs `json:"knobs,omitempty"`
+
+	// Experiment groups this config into a sweep for reporting. Metadata only.
+	Experiment Experiment `json:"experiment,omitempty"`
 }
 
 // IdentityProbe is a GET against the endpoint host whose JSON response is
@@ -444,6 +507,9 @@ func LoadEngine(path string) (*Engine, error) {
 	}
 	if p := e.IdentityProbe; p != nil && p.Path == "" {
 		return nil, fmt.Errorf("engine %s: identity_probe needs a path", path)
+	}
+	if err := e.Knobs.Validate("engine " + path); err != nil {
+		return nil, err
 	}
 	return &e, nil
 }

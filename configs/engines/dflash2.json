@@ -27,5 +27,29 @@
   "non_default_knobs": {
     "draft_arch": "DFlash2",
     "draft_precision": "F16"
+  },
+  "knobs": {
+    "target_model": "qwen3.8-27b",
+    "target_quant": "MQ4R",
+    "target_file": "",
+    "kv_dtype": "q8",
+    "prefill_speculation": "off",
+    "prompt_cache_mode": "",
+    "context_tokens": 32768,
+    "gpu": "0",
+    "gpu_env": {
+      "HIP_VISIBLE_DEVICES": "0"
+    },
+    "replica_id": "r0",
+    "speculation_method": "dflash",
+    "draft_model": "qwen3.8-27b-dflash2",
+    "draft_quant": "F16",
+    "draft_file": ""
+  },
+  "experiment": {
+    "family": "speculation",
+    "variant": "dflash2-f16",
+    "baseline": "ar",
+    "notes": "DFlash speculation with a DFlash2 F16 drafter. Drafter quant is a separate axis; see the draft-quant family."
   }
 }

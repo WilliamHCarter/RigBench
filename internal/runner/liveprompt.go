@@ -91,11 +91,29 @@ func buildLivePrompt(o LiveOptions, tail []prompt.TailBlock) (*prompt.Manifest, 
 }
 
 // liveRecord builds the per-request row for one live turn.
+// liveContext carries the per-turn measurements the record needs beyond the
+// prompt and the response.
+type liveContext struct {
+	Turn          int
+	TurnRole      string
+	TurnMaxTokens int
+	// SharedTokens is how much of this prompt the previous turn's prompt
+	// already contained, in estimated tokens. Runner-measured, so it exists
+	// even against a backend that reports nothing.
+	SharedTokens   int
+	AppendedTokens int
+	ReusableTokens int
+	// LogTelemetry is what the engine wrote to its own log during this request.
+	LogTelemetry client.Telemetry
+}
+
 func liveRecord(o LiveOptions, m *prompt.Manifest, res *client.Result,
-	adapter client.Adapter, turn int) *metrics.Record {
+	adapter client.Adapter, lc liveContext) *metrics.Record {
 
 	e := o.Engine
+	turn := lc.Turn
 	tel := adapter.Extract(res.RawChunks)
+	tel.Merge(lc.LogTelemetry)
 
 	rec := &metrics.Record{
 		RunID:          o.RunID,
@@ -136,11 +154,32 @@ func liveRecord(o LiveOptions, m *prompt.Manifest, res *client.Result,
 		PrefillTokS:           tel.PrefillTokS,
 		DecodeTokS:            tel.DecodeTokS,
 		DecodeTokSDerived:     res.DerivedDecodeTokS(),
+		DraftTokS:             tel.DraftTokS,
+		VerifyTokS:            tel.VerifyTokS,
+		VerifyMS:              tel.VerifyMS,
 		PrefixCacheHitTokens:  tel.PrefixCacheHitTokens,
 		PrefixCacheMissTokens: tel.PrefixCacheMissTokens,
 		DFlashTau:             tel.DFlashTau,
 		DFlashAcceptRate:      tel.DFlashAcceptRate,
 		DFlashBlock:           tel.DFlashBlock,
+		SpeculativeWindows:    tel.SpeculativeWindows,
+		AcceptedTokens:        tel.AcceptedTokens,
+		RejectedTokens:        tel.RejectedTokens,
+
+		SpeculationMethodObserved: tel.SpeculationMethod,
+		KVFormatObserved:          tel.KVFormat,
+		ResolvedModel:             tel.ResolvedModel,
+
+		TurnRole:      lc.TurnRole,
+		TurnMaxTokens: lc.TurnMaxTokens,
+		FinishReason:  res.FinishReason,
+
+		ExperimentFamily:   e.Experiment.Family,
+		ExperimentVariant:  e.Experiment.Variant,
+		ExperimentBaseline: e.Experiment.Baseline,
+		KnobFingerprint:    e.Knobs.Fingerprint(),
+		ReplicaID:          e.Knobs.ReplicaID,
+		GPU:                e.Knobs.GPU,
 
 		Thermal:         o.Thermal,
 		OutputSHA256:    res.OutputSHA256,
@@ -158,6 +197,8 @@ func liveRecord(o LiveOptions, m *prompt.Manifest, res *client.Result,
 		rec.CompletionTokens = res.Usage.CompletionTokens
 		rec.ReasoningTokens = res.ReasoningTokens()
 	}
+	rec.Cache = metrics.ComputeCache(rec.PromptTokens, tel.PrefixCacheHitTokens,
+		lc.ReusableTokens, lc.SharedTokens, lc.AppendedTokens)
 	if res.Err != nil {
 		rec.Error = metrics.Ptr(res.Err.Error())
 	}

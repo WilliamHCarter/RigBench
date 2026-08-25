@@ -112,7 +112,8 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("turn %d: %w", turn, err)
 		}
-		if err := m.AppendsOnto(prevManifest); err != nil {
+		prev := prevManifest
+		if err := m.AppendsOnto(prev); err != nil {
 			return nil, fmt.Errorf("turn %d: %w", turn, err)
 		}
 		prevManifest = m
@@ -124,9 +125,19 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		_ = os.WriteFile(filepath.Join(turnArt, "prompt.txt"),
 			[]byte(prompt.Canonical(m.Messages)), 0o644)
 
+		// Per-turn generation budget. A repair is a delta and does not need an
+		// initial implementation's ceiling; one global cap on every turn invites
+		// the length pathology the one-shot campaign measured.
+		turnRole := lane.TurnLimits.Role(turn, lane.MaxTurns)
+		maxTokens := lane.TurnLimits.For(turn, lane.MaxTurns)
+		if maxTokens == 0 {
+			maxTokens = e.Sampling.MaxTokens
+		}
+
+		o.ServerLog.Mark()
 		res := c.Complete(ctx, client.Request{
 			Model: e.Model, Messages: m.Messages,
-			Temperature: e.Sampling.Temperature, MaxTokens: e.Sampling.MaxTokens,
+			Temperature: e.Sampling.Temperature, MaxTokens: maxTokens,
 			Seed: e.Sampling.Seed, TopP: e.Sampling.TopP,
 			Thinking:             e.Sampling.Thinking,
 			ThinkingOffMechanism: string(e.Sampling.ThinkingOffMechanism),
@@ -138,7 +149,18 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 			_ = os.WriteFile(filepath.Join(turnArt, "request.json"), res.RequestBody, 0o644)
 		}
 
-		rec := liveRecord(o, m, res, adapter, turn)
+		logTel, logSlice := o.ServerLog.Since()
+		if logSlice != "" {
+			_ = os.WriteFile(filepath.Join(turnArt, "server.log"), []byte(logSlice), 0o644)
+		}
+
+		shared, appended := turnReuse(prev, m)
+		rec := liveRecord(o, m, res, adapter, liveContext{
+			Turn: turn, TurnRole: turnRole, TurnMaxTokens: maxTokens,
+			SharedTokens: shared, AppendedTokens: appended,
+			ReusableTokens: o.Tokenizer.Count(prompt.Canonical(m.Messages)[:m.StablePrefixBytes]),
+			LogTelemetry:   logTel,
+		})
 		story.ModelWallMS += res.WallMS
 		story.ModelTurns++
 		addTokens(&story.CompletionTokensTotal, rec.CompletionTokens)
@@ -178,6 +200,10 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 			Index: turn, ModelWallMS: res.WallMS, ToolWallMS: rec.ToolWallMS,
 			PromptBytes: m.PromptBytes, OutputBytes: res.OutputBytes,
 			PatchBytes: len(tr.Patch), PatchApplied: tr.Applied, Gates: tr.Gates,
+			Cache:         rec.Cache,
+			TurnRole:      turnRole,
+			TurnMaxTokens: maxTokens,
+			FinishReason:  res.FinishReason,
 		}
 
 		if tr.Patch != "" {
@@ -282,6 +308,12 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		story.TimeToHiddenGreenMS = metrics.Ptr(float64(time.Since(storyStart).Nanoseconds()) / 1e6)
 	}
 	story.TotalWallMS = story.ModelWallMS + story.ToolWallMS
+	story.Experiment = metrics.StoryExperiment{
+		Family:   e.Experiment.Family,
+		Variant:  e.Experiment.Variant,
+		Baseline: e.Experiment.Baseline,
+	}
+	story.Rollup(out.Records)
 
 	if len(out.Records) > 0 {
 		last := out.Records[len(out.Records)-1]
@@ -335,6 +367,26 @@ func restoreHiddenPlaceholder(ctx context.Context, f *config.Fixture, wt *execut
 		}
 	}
 	return nil
+}
+
+// turnReuse is what this turn shares with the previous one and what it added,
+// in estimated tokens.
+//
+// The append property is asserted before every request, so the previous turn's
+// entire prompt IS the shared prefix -- there is no substring search to do.
+// Turn 0 shares nothing and appends everything, and saying so is the point:
+// reporting a turn-0 prompt as mostly reused would make every story look
+// cache-friendly from the first request.
+func turnReuse(prev, cur *prompt.Manifest) (shared, appended int) {
+	if prev == nil {
+		return 0, cur.PromptTokensEstimated
+	}
+	shared = prev.PromptTokensEstimated
+	appended = cur.PromptTokensEstimated - shared
+	if appended < 0 {
+		appended = 0
+	}
+	return shared, appended
 }
 
 func nextObjective(turn int) string {

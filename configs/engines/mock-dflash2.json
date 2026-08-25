@@ -20,5 +20,10 @@
   "non_default_knobs": {
     "draft_arch": "DFlash2",
     "draft_precision": "F16"
+  },
+  "experiment": {
+    "family": "speculation",
+    "variant": "dflash2-f16",
+    "baseline": "ar"
   }
 }

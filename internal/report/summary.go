@@ -399,6 +399,43 @@ func writeStories(b *strings.Builder, stories []*metrics.Story) {
 		groups[k] = append(groups[k], s)
 	}
 
+	// Experiment grouping, when a sweep named itself. Metadata only: the
+	// benchmark does not decide what to sweep, it only lets a sweep be named so
+	// the report can group by it.
+	byFamily := map[string][]*metrics.Story{}
+	for _, s := range stories {
+		if s.Experiment.Family != "" {
+			byFamily[s.Experiment.Family] = append(byFamily[s.Experiment.Family], s)
+		}
+	}
+	if len(byFamily) > 0 {
+		fams := make([]string, 0, len(byFamily))
+		for f := range byFamily {
+			fams = append(fams, f)
+		}
+		sort.Strings(fams)
+		for _, fam := range fams {
+			w("### Experiment: `%s`\n\n", fam)
+			w("| Variant | Baseline | Green | Total s | Turns | Decode tok/s | tau | Accept | Cached tok | Finish reasons |\n")
+			w("|---|---|---|---|---|---|---|---|---|---|\n")
+			for _, s := range byFamily[fam] {
+				green := "no"
+				if s.Task.Success {
+					green = "**yes**"
+				}
+				w("| `%s` | `%s` | %s | %.1f | %d | %s | %s | %s | %s | %s |\n",
+					orDash(s.Experiment.Variant), orDash(s.Experiment.Baseline), green,
+					s.Task.TotalStoryWallMS/1000, s.Task.ModelTurns,
+					fptr(s.Inference.DecodeTokS), fptr(s.Inference.DFlashTau),
+					fptr(s.Inference.DFlashAcceptRate), iptr(s.Inference.CachedTokensTotal),
+					countMap(s.Inference.FinishReasons))
+			}
+			w("\n**Read the Green column first.** A variant that decoded faster and failed ")
+			w("the Story is not a better variant; the one-shot campaign produced exactly ")
+			w("that row and it would have looked competitive on throughput alone.\n\n")
+		}
+	}
+
 	w("| Engine | Lane | n | Green | Median total s | model s | tool s | Median turns |\n")
 	w("|---|---|---|---|---|---|---|---|\n")
 	for _, k := range order {
@@ -441,6 +478,27 @@ func writeStories(b *strings.Builder, stories []*metrics.Story) {
 			milestoneCell(s.TimeToDiscriminatingGreenMS, s.TurnAtDiscriminatingGreen),
 			s.PatchAttempts, s.FailedApplyAttempts)
 	}
+	// Cache reuse per turn is the defining property of a multi-turn agent
+	// workload, so it gets its own table rather than living inside a details
+	// block nobody opens.
+	w("### Cache reuse per turn\n\n")
+	w("`reusable prefix` and `shared with previous` are measured by the runner from ")
+	w("the bytes it serialized, so they exist even against a backend that reports ")
+	w("nothing. `cached` is the engine's own number, and `not-exposed` is not a miss.\n\n")
+	w("| Engine | Lane | Turn | Role | Cap | Finish | Prompt tok | Reusable prefix | Shared w/ prev | Appended | Cached | Verdict |\n")
+	w("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, s := range stories {
+		for _, t := range s.Turns {
+			c := t.Cache
+			w("| `%s` | %s | %d | %s | %s | %s | %s | %d | %d | %d | %s | %s |\n",
+				s.Engine, s.Lane, t.Index, orDash(t.TurnRole), capCell(t.TurnMaxTokens),
+				orDash(t.FinishReason), promptTokCell(c),
+				c.ReusablePrefixTokens, c.SharedWithPreviousTokens, c.AppendedTokens,
+				iptr(c.CachedTokens), orDash(c.Verdict))
+		}
+	}
+	w("\n")
+
 	w("\n`never` is not zero: a story that never compiled and one that compiled ")
 	w("immediately are different results. **Discriminating** is the first turn at which ")
 	w("the visible rung *and* the candidate-test discrimination gate both pass -- ")
@@ -473,6 +531,60 @@ func writeStories(b *strings.Builder, stories []*metrics.Story) {
 		}
 		w("\n</details>\n\n")
 	}
+}
+
+// promptTokCell reconstructs the engine's prompt-token count from the cache
+// accounting, which holds cached plus newly-prefilled when both were reported.
+func promptTokCell(c metrics.CacheAccounting) string {
+	if c.CachedTokens == nil || c.NewlyPrefilledTokens == nil {
+		return "not exposed"
+	}
+	return fmt.Sprintf("%d", *c.CachedTokens+*c.NewlyPrefilledTokens)
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+func capCell(n int) string {
+	if n == 0 {
+		return "engine default"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// fptr and iptr render an unreported value as "not exposed", never as zero.
+func fptr(v *float64) string {
+	if v == nil {
+		return "not exposed"
+	}
+	return trim(*v)
+}
+
+func iptr(v *int) string {
+	if v == nil {
+		return "not exposed"
+	}
+	return fmt.Sprintf("%d", *v)
+}
+
+func countMap(m map[string]int) string {
+	if len(m) == 0 {
+		return "—"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("`%s`x%d", k, m[k]))
+	}
+	return strings.Join(parts, " ")
 }
 
 func milestoneCell(ms *float64, turn *int) string {

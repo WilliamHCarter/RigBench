@@ -33,6 +33,16 @@ type Story struct {
 
 	StartedAt time.Time `json:"started_at"`
 
+	// Inference and Task are deliberately separate groups.
+	//
+	// After the one-shot campaign this is not a presentational choice. A
+	// configuration decoded ~5% faster than the baseline, generated 2.1x more
+	// output, and failed the task; on a single blended score it would have
+	// looked competitive. Engine performance and workload outcome are different
+	// questions and are answered in different places.
+	Inference InferenceMetrics `json:"inference"`
+	Task      TaskMetrics      `json:"task"`
+
 	// --- the verdict ---
 	// HiddenGreen is the only success condition. Everything else is diagnosis.
 	HiddenGreen bool `json:"hidden_green"`
@@ -82,8 +92,90 @@ type Story struct {
 	// set is not comparable with one without it.
 	HiddenLeakedAfterTurn *int `json:"hidden_leaked_after_turn"`
 
+	Experiment StoryExperiment `json:"experiment"`
+
 	Turns     []StoryTurn       `json:"turns"`
 	Artifacts map[string]string `json:"artifacts,omitempty"`
+}
+
+// InferenceMetrics is how the engine performed. None of it is a success
+// criterion; all of it is explanation.
+type InferenceMetrics struct {
+	ModelWallMS float64 `json:"model_wall_ms"`
+
+	PrefillTokS       *float64 `json:"prefill_tok_s_median"`
+	DecodeTokS        *float64 `json:"decode_tok_s_median"`
+	DecodeTokSDerived *float64 `json:"decode_tok_s_derived_median"`
+	DraftTokS         *float64 `json:"draft_tok_s_median"`
+	VerifyTokS        *float64 `json:"verify_tok_s_median"`
+
+	VisibleTTFTMS   *float64 `json:"visible_ttft_ms_median"`
+	ReasoningTTFTMS *float64 `json:"reasoning_ttft_ms_median"`
+
+	DFlashTau          *float64 `json:"dflash_tau_median"`
+	DFlashAcceptRate   *float64 `json:"dflash_accept_rate_median"`
+	SpeculativeWindows *int     `json:"speculative_windows_total"`
+	AcceptedTokens     *int     `json:"accepted_tokens_total"`
+	RejectedTokens     *int     `json:"rejected_tokens_total"`
+
+	PromptTokensTotal     *int `json:"prompt_tokens_total"`
+	CompletionTokensTotal *int `json:"completion_tokens_total"`
+	ReasoningTokensTotal  *int `json:"reasoning_tokens_total"`
+
+	// CachedTokensTotal and NewlyPrefilledTokensTotal are the engine's own
+	// numbers summed over the story. ReusableSharedTokensTotal is the runner's
+	// measurement of what consecutive turns shared, available even against a
+	// backend that reports nothing.
+	CachedTokensTotal         *int `json:"cached_tokens_total"`
+	NewlyPrefilledTokensTotal *int `json:"newly_prefilled_tokens_total"`
+	SharedWithPreviousTotal   int  `json:"shared_with_previous_tokens_estimated_total"`
+	// CacheVerdicts counts each turn's classification, so "not-exposed" cannot
+	// be mistaken for "miss" in aggregate.
+	CacheVerdicts map[string]int `json:"cache_verdicts"`
+
+	// FinishReasons counts why each completion stopped. A story whose turns all
+	// hit the token ceiling is a different result from one whose turns stopped
+	// naturally, however similar the wall clock.
+	FinishReasons map[string]int `json:"finish_reasons"`
+
+	KnobFingerprint string `json:"knob_fingerprint,omitempty"`
+	ResolvedModel   string `json:"resolved_model,omitempty"`
+	KVFormat        string `json:"kv_format,omitempty"`
+	ReplicaID       string `json:"replica_id,omitempty"`
+	GPU             string `json:"gpu,omitempty"`
+}
+
+// TaskMetrics is whether the workload succeeded, and what it cost. This is the
+// group the north-star metric comes from.
+type TaskMetrics struct {
+	Success    bool   `json:"success"`
+	StopReason string `json:"stop_reason"`
+
+	ModelTurns          int `json:"model_turns"`
+	PatchAttempts       int `json:"patch_attempts"`
+	FailedApplyAttempts int `json:"failed_apply_attempts"`
+	NoDiffTurns         int `json:"no_diff_turns"`
+
+	ToolWallMS  float64 `json:"tool_wall_ms"`
+	ModelWallMS float64 `json:"model_wall_ms"`
+	// TotalStoryWallMS is the north star: model time plus tool time.
+	TotalStoryWallMS float64 `json:"total_story_wall_ms"`
+
+	TimeToFirstCompilingPatchMS *float64 `json:"time_to_first_compiling_patch_ms"`
+	// TimeToDiscriminatingGreenMS replaces what a spec would naturally call
+	// time-to-visible-green. The visible suite alone is satisfied by a patch
+	// that implements nothing, so visible-green is not a milestone; this is the
+	// first turn at which the visible rung and the candidate-test
+	// discrimination gate both pass.
+	TimeToDiscriminatingGreenMS *float64 `json:"time_to_discriminating_green_ms"`
+	TimeToHiddenGreenMS         *float64 `json:"time_to_hidden_green_ms"`
+}
+
+// Experiment groups a story into a sweep, for reporting only.
+type StoryExperiment struct {
+	Family   string `json:"family,omitempty"`
+	Variant  string `json:"variant,omitempty"`
+	Baseline string `json:"baseline,omitempty"`
 }
 
 // StoryTurn is the per-turn summary. The full record for each turn is in
@@ -99,7 +191,16 @@ type StoryTurn struct {
 	// Gates is this turn's outcome. The hidden suite appears only on the turn
 	// it was actually run, which is once per story.
 	Gates []Gate `json:"gates"`
-	Note  string `json:"note,omitempty"`
+	// Cache is this turn's accounting. In a multi-turn loop this is the number
+	// that predicts prefill work, and it is recorded per turn so the shape of
+	// reuse across a story is visible rather than only its total.
+	Cache CacheAccounting `json:"cache"`
+	// TurnRole and TurnMaxTokens say which per-turn budget this turn drew on;
+	// FinishReason says whether it hit that budget.
+	TurnRole      string `json:"turn_role,omitempty"`
+	TurnMaxTokens int    `json:"turn_max_tokens,omitempty"`
+	FinishReason  string `json:"finish_reason,omitempty"`
+	Note          string `json:"note,omitempty"`
 }
 
 const StorySchema = "agentbench/story/v1"

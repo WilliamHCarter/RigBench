@@ -61,6 +61,13 @@ func (r *CommandResult) Combined() string {
 
 // Run executes argv in dir with a hard timeout.
 func Run(ctx context.Context, dir string, argv []string, timeout time.Duration) *CommandResult {
+	return RunEnv(ctx, dir, argv, nil, timeout)
+}
+
+// RunEnv is Run with additional environment variables, which is how an engine
+// config's tuning axes reach a preparation hook without the harness knowing
+// what any of them mean.
+func RunEnv(ctx context.Context, dir string, argv, env []string, timeout time.Duration) *CommandResult {
 	res := &CommandResult{Argv: argv, Dir: dir}
 	if len(argv) == 0 {
 		res.Unavailable = true
@@ -81,6 +88,7 @@ func Run(ctx context.Context, dir string, argv []string, timeout time.Duration) 
 	// A deterministic, minimal environment: a benchmark whose result depends on
 	// the operator's shell is not reproducible.
 	cmd.Env = append(os.Environ(), "NO_COLOR=1", "CLICOLOR=0", "TERM=dumb")
+	cmd.Env = append(cmd.Env, env...)
 
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out

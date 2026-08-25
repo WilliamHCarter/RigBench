@@ -122,6 +122,10 @@ type Result struct {
 	OutputSHA256 string
 	OutputBytes  int
 
+	// FinishReason is the engine's own stop reason. A completion that hit its
+	// token ceiling and one that stopped naturally are different results.
+	FinishReason string
+
 	// ChunkCount and StreamedBytes describe the transport itself, which is how
 	// a server that buffers the whole answer into one chunk is told apart from
 	// one that genuinely streams.
@@ -299,6 +303,11 @@ func (c *Client) Complete(ctx context.Context, req Request) *Result {
 		}
 		if ch.Usage != nil {
 			res.Usage = ch.Usage
+		}
+		for _, c0 := range ch.Choices {
+			if c0.FinishReason != nil && *c0.FinishReason != "" {
+				res.FinishReason = *c0.FinishReason
+			}
 		}
 		for _, c0 := range ch.Choices {
 			r := c0.Delta.Reasoning

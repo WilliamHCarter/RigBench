@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WilliamHCarter/RigBench/internal/client"
 	"github.com/WilliamHCarter/RigBench/internal/config"
 	"github.com/WilliamHCarter/RigBench/internal/executor"
 	"github.com/WilliamHCarter/RigBench/internal/metrics"
@@ -40,6 +41,7 @@ type runFlags struct {
 	warmup        int
 	beforeEngine  string
 	allowDrift    bool
+	serverLog     string
 	verifyFixture bool
 	caveats       []string
 	// layoutRows, when set, is rendered as the summary's layout A/B section.
@@ -74,6 +76,10 @@ func cmdRun(args []string) error {
 		"discarded priming requests sent before the first measured turn. This is the "+
 			"resident-server warm protocol: warm is produced deliberately and recorded, "+
 			"never inferred from elapsed time.")
+	fs.StringVar(&rf.serverLog, "server-log", "",
+		"path to the engine's own log. Telemetry it writes there rather than to the "+
+			"response stream is read per request and merged, instead of being grepped "+
+			"out of serve.log by hand.")
 	fs.BoolVar(&rf.allowDrift, "allow-toolchain-drift", false,
 		"record the run even though the compiler differs from the one the fixture was "+
 			"verified under. The mismatch becomes a caveat on every row rather than an "+
@@ -209,6 +215,17 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		}
 		id := &metrics.EngineIdentity{
 			Name: e.Name, Endpoint: ep, Model: e.Model,
+			RequestedModel:  e.Model,
+			TargetFile:      e.Knobs.TargetFile,
+			TargetSHA256:    e.Knobs.TargetSHA256,
+			DraftFile:       e.Knobs.DraftFile,
+			DraftSHA256:     e.Knobs.DraftSHA256,
+			KnobsRequested:  e.Knobs.Env(),
+			KnobFingerprint: e.Knobs.Fingerprint(),
+			Experiment: metrics.ExperimentIdentity{
+				Family: e.Experiment.Family, Variant: e.Experiment.Variant,
+				Baseline: e.Experiment.Baseline, Notes: e.Experiment.Notes,
+			},
 			EngineCommit: e.EngineCommit, ModelHash: e.ModelHash, DraftHash: e.DraftHash,
 			TargetQuant: e.TargetQuant, KVMode: e.KVMode, SpeculationMode: e.SpeculationMode,
 			NonDefaultKnobs: e.NonDefaultKnobs, TelemetryAdapter: e.TelemetryAdapter,
@@ -281,9 +298,15 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		return "", fmt.Errorf("internal: bad run schedule: %w", err)
 	}
 
+	var srvLog *client.ServerLog
+	if rf.serverLog != "" {
+		srvLog = &client.ServerLog{Path: rf.serverLog}
+	}
+
 	optsFor := func(e *config.Engine) runner.Options {
 		return runner.Options{
-			Fixture: f, Engine: e, Layout: layout,
+			ServerLog: srvLog,
+			Fixture:   f, Engine: e, Layout: layout,
 			ContextPack: rf.contextPack, Thermal: rf.thermal,
 			RunID: runID, RunDir: runDir, WorkDir: workDir,
 			Tokenizer: tok, EndpointOverride: rf.endpoint,

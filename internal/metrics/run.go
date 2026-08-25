@@ -64,10 +64,38 @@ type EngineIdentity struct {
 	// so two configs sent to one already-running daemon yield two differently
 	// labelled rows from one actual configuration. Attested is false for such a
 	// run, and the summary says so rather than presenting the labels as facts.
+	// --- what was requested versus what was loaded ---
+	// RequestedModel is the alias the config asked for; ResolvedModel is what
+	// the server said it actually loaded. The `fast` alias resolving to a
+	// different artifact has already cost a campaign, so the two never share a
+	// field.
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
+	TargetFile     string `json:"target_file,omitempty"`
+	TargetSHA256   string `json:"target_sha256,omitempty"`
+	DraftFile      string `json:"draft_file,omitempty"`
+	DraftSHA256    string `json:"draft_sha256,omitempty"`
+
+	// KnobsRequested is every tuning axis this config set, as handed to the
+	// preparation hook. KnobFingerprint is its stable one-line summary.
+	KnobsRequested  []string `json:"knobs_requested,omitempty"`
+	KnobFingerprint string   `json:"knob_fingerprint,omitempty"`
+
+	Experiment ExperimentIdentity `json:"experiment,omitempty"`
+
 	Attested          bool   `json:"attested"`
 	AttestationMethod string `json:"attestation_method"`
 	PreparationLog    string `json:"preparation_log,omitempty"`
 	ProbeArtifact     string `json:"probe_artifact,omitempty"`
+}
+
+// ExperimentIdentity groups a run into a sweep. Metadata only: the benchmark
+// does not decide what to sweep.
+type ExperimentIdentity struct {
+	Family   string `json:"family,omitempty"`
+	Variant  string `json:"variant,omitempty"`
+	Baseline string `json:"baseline,omitempty"`
+	Notes    string `json:"notes,omitempty"`
 }
 
 type HostIdentity struct {

@@ -19,6 +19,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.2.2 — review fixes: run schedule topology | complete |
 | v0.2.3 — gate stack controls + toolchain pin | complete |
 | v0.3 — live builder repair loop | complete, acceptance gate green |
+| v0.3.1 — extensibility addendum (knobs, cache, provenance) | complete |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -116,6 +117,15 @@ runs/<run-id>/               volatile output; never embedded into a prompt
   hidden suite is injected once, after the loop stops. The acceptance gate scans
   every prompt of every turn for hidden-suite content, with the diagnostic lane
   as its negative control.
+- **Engine performance and workload outcome are separate groups.** A
+  configuration that decodes faster, generates twice as much, and fails the task
+  cannot look competitive: `story.inference` and `story.task` never blend.
+- **Three numbers get called "the cache hit" and none is dropped.** What the
+  prompt makes reusable, what a turn shares with the one before it, and what the
+  engine says it reused are recorded separately, per turn.
+- **Tuning axes are data, not code.** 25 named knobs reach the preparation hook
+  as environment variables; the benchmark records what was asked for and has no
+  opinion about which values are good.
 - **The north star is seconds per hidden-green Story**, and medians cover green
   stories only — a story that failed fast is not a fast story.
 - **The gate stack has controls of its own.** A patch that adds one comment
@@ -166,7 +176,7 @@ story could reuse from the first:
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
 [docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md),
-[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md).
+[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md), [docs/v0.3.1.md](docs/v0.3.1.md).
 
 ## Toolchain
 

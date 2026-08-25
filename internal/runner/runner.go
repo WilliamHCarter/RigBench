@@ -54,6 +54,9 @@ type Options struct {
 	Trajectory *config.Trajectory
 	// Repetition is which steady-state repeat this call belongs to.
 	Repetition int
+	// ServerLog, when set, is read between requests for telemetry the engine
+	// writes to its own log rather than to the response stream.
+	ServerLog *client.ServerLog
 }
 
 // Result is one completed builder request plus the paths it wrote.

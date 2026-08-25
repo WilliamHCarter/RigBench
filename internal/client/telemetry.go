@@ -10,15 +10,43 @@ import (
 // is a pointer and every pointer is nil unless an engine actually reported the
 // value. Nothing here is derived, inferred or defaulted.
 type Telemetry struct {
+	// --- throughput, by stage ---
 	PrefillTokS *float64
 	DecodeTokS  *float64
+	// DraftTokS and VerifyTokS decompose a speculative decode. A configuration
+	// whose draft is fast and whose verification is slow, and one where the
+	// reverse holds, have the same headline decode rate and different fixes.
+	DraftTokS  *float64
+	VerifyTokS *float64
+	VerifyMS   *float64
 
+	// --- prompt cache ---
 	PrefixCacheHitTokens  *int
 	PrefixCacheMissTokens *int
 
-	DFlashTau        *float64
-	DFlashAcceptRate *float64
-	DFlashBlock      *int
+	// --- speculative internals ---
+	SpeculationMethod string
+	DFlashTau         *float64
+	DFlashAcceptRate  *float64
+	DFlashBlock       *int
+	// SpeculativeWindows is how many speculative rounds ran. An acceptance rate
+	// over three windows and one over five thousand are not the same evidence,
+	// and the rate alone cannot tell them apart.
+	SpeculativeWindows *int
+	AcceptedTokens     *int
+	RejectedTokens     *int
+
+	// --- what was actually loaded ---
+	// The requested model alias and the artifact the server resolved it to are
+	// different strings. Conflating them has already cost a campaign, so the
+	// resolved side is recorded separately and never overwrites the request.
+	ResolvedModel string
+	KVFormat      string
+	TargetFile    string
+	TargetSHA256  string
+	DraftFile     string
+	DraftSHA256   string
+	EngineCommit  string
 }
 
 // Adapter reads engine-specific fields out of the raw SSE chunks.
@@ -71,8 +99,13 @@ func (Hipfire) Extract(chunks []json.RawMessage) Telemetry {
 			}
 			mergeFloat(&t.PrefillTokS, m, "prefill_tok_s", "prefill_tokens_per_second")
 			mergeFloat(&t.DecodeTokS, m, "decode_tok_s", "decode_tokens_per_second")
+			mergeFloat(&t.DraftTokS, m, "draft_tok_s", "drafter_tok_s")
+			mergeFloat(&t.VerifyTokS, m, "verify_tok_s", "verification_tok_s")
+			mergeFloat(&t.VerifyMS, m, "verify_ms", "verification_ms")
 			mergeInt(&t.PrefixCacheHitTokens, m, "prefix_cache_hit_tokens", "cached_tokens")
 			mergeInt(&t.PrefixCacheMissTokens, m, "prefix_cache_miss_tokens")
+			mergeStr(&t.KVFormat, m, "kv_format", "kv_cache", "kv_dtype")
+			mergeStr(&t.ResolvedModel, m, "resolved_model", "model_file", "model")
 
 			if spec, ok := m["speculation"]; ok {
 				var s map[string]json.RawMessage
@@ -80,11 +113,20 @@ func (Hipfire) Extract(chunks []json.RawMessage) Telemetry {
 					mergeFloat(&t.DFlashTau, s, "tau")
 					mergeFloat(&t.DFlashAcceptRate, s, "accept_rate", "acceptance")
 					mergeInt(&t.DFlashBlock, s, "block", "active_block")
+					mergeInt(&t.SpeculativeWindows, s, "windows", "n_windows")
+					mergeInt(&t.AcceptedTokens, s, "accepted", "accepted_tokens")
+					mergeInt(&t.RejectedTokens, s, "rejected", "rejected_tokens")
+					mergeStr(&t.SpeculationMethod, s, "mode", "method", "drafter")
+					mergeFloat(&t.DraftTokS, s, "draft_tok_s")
+					mergeFloat(&t.VerifyTokS, s, "verify_tok_s")
 				}
 			}
 			mergeFloat(&t.DFlashTau, m, "dflash_tau")
 			mergeFloat(&t.DFlashAcceptRate, m, "dflash_accept_rate")
 			mergeInt(&t.DFlashBlock, m, "dflash_block")
+			mergeInt(&t.SpeculativeWindows, m, "speculative_windows")
+			mergeInt(&t.AcceptedTokens, m, "accepted_tokens")
+			mergeInt(&t.RejectedTokens, m, "rejected_tokens")
 		}
 	}
 	return t
@@ -102,6 +144,23 @@ func mergeFloat(dst **float64, m map[string]json.RawMessage, keys ...string) {
 		var v float64
 		if json.Unmarshal(raw, &v) == nil {
 			*dst = metrics.Ptr(v)
+			return
+		}
+	}
+}
+
+func mergeStr(dst *string, m map[string]json.RawMessage, keys ...string) {
+	if *dst != "" {
+		return
+	}
+	for _, k := range keys {
+		raw, ok := m[k]
+		if !ok {
+			continue
+		}
+		var v string
+		if json.Unmarshal(raw, &v) == nil && v != "" {
+			*dst = v
 			return
 		}
 	}
@@ -135,4 +194,53 @@ func AdapterFor(name string) (Adapter, bool) {
 		return Hipfire{}, true
 	}
 	return nil, false
+}
+
+// Merge folds a second telemetry source into t, preferring values already
+// present.
+//
+// Used to combine what the response stream reported with what a server log line
+// said. Neither silently overwrites the other: the stream is preferred because
+// it is unambiguously attributable to this request, and the log fills the gaps
+// it left. A field neither source reported stays null.
+func (t *Telemetry) Merge(o Telemetry) {
+	mergeF(&t.PrefillTokS, o.PrefillTokS)
+	mergeF(&t.DecodeTokS, o.DecodeTokS)
+	mergeF(&t.DraftTokS, o.DraftTokS)
+	mergeF(&t.VerifyTokS, o.VerifyTokS)
+	mergeF(&t.VerifyMS, o.VerifyMS)
+	mergeI(&t.PrefixCacheHitTokens, o.PrefixCacheHitTokens)
+	mergeI(&t.PrefixCacheMissTokens, o.PrefixCacheMissTokens)
+	mergeF(&t.DFlashTau, o.DFlashTau)
+	mergeF(&t.DFlashAcceptRate, o.DFlashAcceptRate)
+	mergeI(&t.DFlashBlock, o.DFlashBlock)
+	mergeI(&t.SpeculativeWindows, o.SpeculativeWindows)
+	mergeI(&t.AcceptedTokens, o.AcceptedTokens)
+	mergeI(&t.RejectedTokens, o.RejectedTokens)
+	mergeStrField(&t.SpeculationMethod, o.SpeculationMethod)
+	mergeStrField(&t.ResolvedModel, o.ResolvedModel)
+	mergeStrField(&t.KVFormat, o.KVFormat)
+	mergeStrField(&t.TargetFile, o.TargetFile)
+	mergeStrField(&t.TargetSHA256, o.TargetSHA256)
+	mergeStrField(&t.DraftFile, o.DraftFile)
+	mergeStrField(&t.DraftSHA256, o.DraftSHA256)
+	mergeStrField(&t.EngineCommit, o.EngineCommit)
+}
+
+func mergeF(dst **float64, v *float64) {
+	if *dst == nil && v != nil {
+		*dst = v
+	}
+}
+
+func mergeI(dst **int, v *int) {
+	if *dst == nil && v != nil {
+		*dst = v
+	}
+}
+
+func mergeStrField(dst *string, v string) {
+	if *dst == "" {
+		*dst = v
+	}
 }

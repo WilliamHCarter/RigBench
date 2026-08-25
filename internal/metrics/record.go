@@ -175,12 +175,52 @@ type Record struct {
 	// merging them would produce a number belonging to neither.
 	DecodeTokSDerived *float64 `json:"decode_tok_s_derived"`
 
+	DraftTokS  *float64 `json:"draft_tok_s"`
+	VerifyTokS *float64 `json:"verify_tok_s"`
+	VerifyMS   *float64 `json:"verify_ms"`
+
 	PrefixCacheHitTokens  *int `json:"prefix_cache_hit_tokens"`
 	PrefixCacheMissTokens *int `json:"prefix_cache_miss_tokens"`
+	// Cache is the three-way accounting: what the prompt makes reusable, what
+	// this turn shares with the previous one, and what the engine says it
+	// reused. See cache.go for why one number is not enough.
+	Cache CacheAccounting `json:"cache"`
 
 	DFlashTau        *float64 `json:"dflash_tau"`
 	DFlashAcceptRate *float64 `json:"dflash_accept_rate"`
 	DFlashBlock      *int     `json:"dflash_block"`
+	// Speculative internals. An acceptance rate over three windows and one over
+	// five thousand are not the same evidence, and the rate cannot tell them
+	// apart on its own.
+	SpeculativeWindows        *int   `json:"speculative_windows"`
+	AcceptedTokens            *int   `json:"accepted_tokens"`
+	RejectedTokens            *int   `json:"rejected_tokens"`
+	SpeculationMethodObserved string `json:"speculation_method_observed,omitempty"`
+	KVFormatObserved          string `json:"kv_format_observed,omitempty"`
+
+	// TurnRole and TurnMaxTokens record which per-turn budget this request drew
+	// on, so a truncated answer can be attributed to the ceiling that caused it.
+	TurnRole      string `json:"turn_role,omitempty"`
+	TurnMaxTokens int    `json:"turn_max_tokens,omitempty"`
+	// FinishReason is the engine's own stop reason. A completion that hit its
+	// ceiling and one that stopped naturally are different results, and the
+	// one-shot campaign turned on exactly that distinction.
+	FinishReason string `json:"finish_reason,omitempty"`
+
+	// Experiment groups this row into a sweep. Metadata, never logic.
+	ExperimentFamily   string `json:"experiment_family,omitempty"`
+	ExperimentVariant  string `json:"experiment_variant,omitempty"`
+	ExperimentBaseline string `json:"experiment_baseline,omitempty"`
+	// KnobFingerprint is a stable summary of every set tuning axis. Two rows
+	// with the same fingerprint asked the server for the same thing.
+	KnobFingerprint string `json:"knob_fingerprint,omitempty"`
+	ReplicaID       string `json:"replica_id,omitempty"`
+	GPU             string `json:"gpu,omitempty"`
+
+	// ResolvedModel is what the server said it actually loaded, which is not
+	// always what was requested. The `fast` alias resolving to a different
+	// artifact has already cost a campaign.
+	ResolvedModel string `json:"resolved_model,omitempty"`
 
 	// Thermal classifies the measurement. Cold, first-capture and steady-state
 	// rows are never aggregated together.

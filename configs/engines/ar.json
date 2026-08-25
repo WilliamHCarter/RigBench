@@ -23,5 +23,26 @@
     "max_tokens": 12288,
     "thinking": "off",
     "thinking_off_mechanism": "chat_template_kwargs"
+  },
+  "knobs": {
+    "target_model": "qwen3.8-27b",
+    "target_quant": "MQ4R",
+    "target_file": "",
+    "kv_dtype": "q8",
+    "prefill_speculation": "off",
+    "prompt_cache_mode": "",
+    "context_tokens": 32768,
+    "gpu": "0",
+    "gpu_env": {
+      "HIP_VISIBLE_DEVICES": "0"
+    },
+    "replica_id": "r0",
+    "speculation_method": "off"
+  },
+  "experiment": {
+    "family": "speculation",
+    "variant": "ar",
+    "baseline": "ar",
+    "notes": "The autoregressive reference every speculation candidate is compared against."
   }
 }

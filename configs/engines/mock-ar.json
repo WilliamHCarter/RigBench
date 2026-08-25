@@ -16,5 +16,10 @@
     "max_tokens": 12288,
     "thinking": "off",
     "thinking_off_mechanism": "chat_template_kwargs"
+  },
+  "experiment": {
+    "family": "speculation",
+    "variant": "ar",
+    "baseline": "ar"
   }
 }
