@@ -21,6 +21,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.3 — live builder repair loop | complete, acceptance gate green |
 | v0.3.1 — extensibility addendum (knobs, cache, provenance) | complete |
 | v0.3.2 — adversarial review of the live loop | complete |
+| v0.3.3 — Hipfire adapter matches the real machine | complete |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -177,7 +178,7 @@ story could reuse from the first:
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
 [docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md),
-[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md), [docs/v0.3.1.md](docs/v0.3.1.md), [docs/v0.3.2.md](docs/v0.3.2.md).
+[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md), [docs/v0.3.1.md](docs/v0.3.1.md), [docs/v0.3.2.md](docs/v0.3.2.md), [docs/v0.3.3.md](docs/v0.3.3.md).
 
 ## Toolchain
 

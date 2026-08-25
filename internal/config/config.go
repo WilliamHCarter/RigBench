@@ -371,6 +371,15 @@ type Engine struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 
+	// PrepareProfile is the recipe name handed to the preparation hook, when it
+	// differs from Name.
+	//
+	// Display identity and server preparation are different things: `ar-medium`
+	// and `ar-xhigh` are distinct rows in a report and the same server setup.
+	// Without this, adding a reasoning variant meant either renaming the row or
+	// adding a hook branch that does nothing new. Defaults to Name.
+	PrepareProfile string `json:"prepare_profile,omitempty"`
+
 	Endpoint  string `json:"endpoint"`
 	APIKeyEnv string `json:"api_key_env,omitempty"`
 	Model     string `json:"model"`
@@ -481,6 +490,9 @@ func LoadEngine(path string) (*Engine, error) {
 	}
 	if e.TelemetryAdapter == "" {
 		e.TelemetryAdapter = "generic"
+	}
+	if e.PrepareProfile == "" {
+		e.PrepareProfile = e.Name
 	}
 	if e.Name == "" || e.Endpoint == "" || e.Model == "" {
 		return nil, fmt.Errorf("engine %s: name, endpoint and model are all required", path)

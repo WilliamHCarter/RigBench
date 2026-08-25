@@ -10,13 +10,15 @@
   "telemetry_adapter": "hipfire",
   "identity_probe": {
     "path": "/health",
-    "require": {},
+    "require": {
+      "model": "qwen3.8:27b-mq4-xt"
+    },
     "record": {
       "version": "engine_commit",
       "model_hash": "model_hash",
       "draft_model": "draft_hash"
     },
-    "note": "STEP 0 OF docs/rig-campaign.md: identity_probe.require is deliberately empty. The rig fix that split AGENTBENCH_HEALTH_MODEL from the serve alias showed that /health reports a different model name than the name used to serve, so a require block guessed from the alias would abort every run. Inspect the real /health response, then put the value it actually reports here -- and, if the build exposes a field that distinguishes AR from DFlash, put that here too. That is what turns the row label from a claim into a checked fact."
+    "note": "`model` is the RESOLVED artifact the server reports at /health, which is not the alias used to serve it: this rig serves `qwen3.8:27b-fast` and /health answers `qwen3.8:27b-mq4-xt`. Guessing the alias here recreates a five-minute false readiness timeout. Hipfire's health payload does not expose speculation state, so this attests the resolved target only; the speculation arm is attested by the preparation log's config dump."
   },
   "sampling": {
     "temperature": 0,
@@ -30,11 +32,10 @@
   "knobs": {
     "target_model": "qwen3.8-27b",
     "target_quant": "MQ4R",
-    "target_file": "",
+    "target_file": "/home/willy/.hipfire/models/qwen3.8-27b.mq4r",
     "kv_dtype": "q8",
     "prefill_speculation": "off",
     "prompt_cache_mode": "",
-    "context_tokens": 32768,
     "gpu": "0",
     "gpu_env": {
       "HIP_VISIBLE_DEVICES": "0"
@@ -43,12 +44,15 @@
     "speculation_method": "dflash",
     "draft_model": "qwen3.8-27b-dflash2",
     "draft_quant": "F16",
-    "draft_file": ""
+    "draft_file": "/home/willy/.hipfire/models/qwen3.8-27b-dflash2-f16.hfq",
+    "target_sha256": "61072980798ac1d3325020a63171d1a9cf99103eaa5bb1675a37845ea7d7762e",
+    "draft_sha256": "d466f5b611ca907d61e5d45745a659397244a188e66dfa42341fcc2a6ea8c112"
   },
   "experiment": {
     "family": "speculation-live",
     "variant": "dflash2-f16-medium",
     "baseline": "ar-medium",
     "notes": "Live builder lane at medium reasoning. Not comparable with the no-think one-shot rows."
-  }
+  },
+  "prepare_profile": "dflash2-f16"
 }

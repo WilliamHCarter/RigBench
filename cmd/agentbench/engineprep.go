@@ -77,17 +77,19 @@ func prepareEngine(ctx context.Context, e *config.Engine, hook, endpoint, runDir
 		// harness declares the axis and records what was asked for; the hook
 		// knows how to apply it. Neither needs an opinion about the value.
 		env := e.Knobs.Env()
-		r := executor.RunEnv(ctx, ".", []string{abs, e.Name}, env, timeout)
+		// The hook is given the preparation profile, not the display name: the
+		// two differ whenever a reasoning variant reuses a server setup.
+		r := executor.RunEnv(ctx, ".", []string{abs, e.PrepareProfile}, env, timeout)
 		logPath := filepath.Join(dir, e.Name+suffix+".prepare.log")
 		body := fmt.Sprintf("$ %s %s\n(knobs: %s)\nexit %d  duration %s  timed_out=%v unavailable=%v\n\n%s\n",
-			abs, e.Name, strings.Join(env, " "),
+			abs, e.PrepareProfile, strings.Join(env, " "),
 			r.ExitCode, r.Duration.Round(time.Millisecond),
 			r.TimedOut, r.Unavailable, r.Combined())
 		_ = os.WriteFile(logPath, []byte(body), 0o644)
 		att.PreparedLog = filepath.ToSlash(filepath.Join("artifacts", "engine-prep", e.Name+suffix+".prepare.log"))
 		if !r.OK() {
-			return nil, fmt.Errorf("preparation hook failed for %s (exit %d): %s\nsee %s",
-				e.Name, r.ExitCode, firstLineOf(r.Combined()), logPath)
+			return nil, fmt.Errorf("preparation hook failed for %s (profile %q, exit %d): %s\nsee %s",
+				e.Name, e.PrepareProfile, r.ExitCode, firstLineOf(r.Combined()), logPath)
 		}
 		att.Prepared = true
 		att.KnobEnv = env

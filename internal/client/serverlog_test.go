@@ -111,3 +111,30 @@ func TestServerLogWithNoPathIsHarmless(t *testing.T) {
 		t.Fatal("a nil log produced something")
 	}
 }
+
+// The shape the pinned server actually prints. The key=value scanner cannot see
+// a parenthetical, so window counts were staying null against the very server
+// this parser was written for.
+func TestParseServerLogReadsTheParentheticalWindowCount(t *testing.T) {
+	tel := ParseServerLog(
+		"[req 7f3a] drafter=dflash tau=4.86 tok/s=32.9 decode (32768 tok, 5593 windows)\n")
+	if tel.SpeculativeWindows == nil || *tel.SpeculativeWindows != 5593 {
+		t.Fatalf("windows = %v", tel.SpeculativeWindows)
+	}
+	if tel.DFlashTau == nil || *tel.DFlashTau != 4.86 {
+		t.Fatalf("tau = %v", tel.DFlashTau)
+	}
+	if tel.DecodeTokS == nil || *tel.DecodeTokS != 32.9 {
+		t.Fatalf("decode = %v", tel.DecodeTokS)
+	}
+}
+
+// Token count over window count is an average window size, not an acceptance
+// figure. A guessed metric is worse than a null one.
+func TestParentheticalDoesNotInventAcceptedOrRejected(t *testing.T) {
+	tel := ParseServerLog("decode (32768 tok, 5593 windows)\n")
+	if tel.AcceptedTokens != nil || tel.RejectedTokens != nil {
+		t.Fatalf("accepted=%v rejected=%v were derived from a token/window pair",
+			tel.AcceptedTokens, tel.RejectedTokens)
+	}
+}

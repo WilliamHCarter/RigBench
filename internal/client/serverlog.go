@@ -123,6 +123,19 @@ var logKeys = map[string]string{
 	"commit":        "commit",
 }
 
+// parenWindows matches the shape the pinned Hipfire actually prints its
+// speculative decode summary in:
+//
+//	[req ...] drafter=dflash tau=4.86 tok/s=32.9 decode (32768 tok, 5593 windows)
+//
+// The key=value scanner cannot see this, so window counts were staying null
+// against the very server the parser was written for.
+//
+// Deliberately NOT used to derive accepted or rejected tokens. Token count over
+// window count is an average window size, not an acceptance figure, and a
+// guessed metric is worse than a null one.
+var parenWindows = regexp.MustCompile(`\((\d+)\s+tok,\s*(\d+)\s+windows\)`)
+
 // ParseServerLog extracts telemetry from a slice of server log text.
 //
 // Later lines win, because a per-request summary is usually printed after the
@@ -130,6 +143,9 @@ var logKeys = map[string]string{
 func ParseServerLog(text string) Telemetry {
 	var t Telemetry
 	for _, line := range strings.Split(text, "\n") {
+		if m := parenWindows.FindStringSubmatch(line); m != nil {
+			setI(&t.SpeculativeWindows, m[2])
+		}
 		for _, m := range kvRe.FindAllStringSubmatch(line, -1) {
 			key := strings.ToLower(m[1])
 			field, known := logKeys[key]

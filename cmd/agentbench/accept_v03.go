@@ -303,9 +303,17 @@ func checkStoryInvariants(s *metrics.Story, runDir string) error {
 		return fmt.Errorf("final hidden %.1f exceeds all tool time %.1f",
 			s.FinalHiddenWallMS, s.ToolWallMS)
 	}
-	if s.TimeToHiddenGreenMS != nil && *s.TimeToHiddenGreenMS > s.TotalWallMS+eps {
-		return fmt.Errorf("time_to_hidden_green %.1f exceeds total_wall %.1f",
-			*s.TimeToHiddenGreenMS, s.TotalWallMS)
+	// A green story reaches hidden-green as the last thing it does, so the
+	// milestone equals the total. Asserted as equality rather than as an upper
+	// bound: stamping it before the hidden suite's own duration was added made
+	// it pass an upper-bound check while understating itself by exactly that
+	// duration.
+	if s.TimeToHiddenGreenMS != nil {
+		if diff := *s.TimeToHiddenGreenMS - s.TotalWallMS; diff > eps || diff < -eps {
+			return fmt.Errorf("time_to_hidden_green %.1f != total_wall %.1f; a story cannot "+
+				"be known green before the hidden suite finishes, so the milestone must "+
+				"include its duration", *s.TimeToHiddenGreenMS, s.TotalWallMS)
+		}
 	}
 	if s.Task.TotalStoryWallMS != s.TotalWallMS {
 		return fmt.Errorf("task group disagrees with the story on total wall")

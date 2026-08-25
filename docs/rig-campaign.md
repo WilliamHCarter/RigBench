@@ -5,11 +5,48 @@ review asked for. Nothing here has been run: no Hipfire server is reachable from
 the workstation this was written on, so treat step 0 as mandatory rather than
 ceremonial.
 
+## What this rig is, as established
+
+Recorded here so nobody re-derives it from a terminal session.
+
+| | Value |
+|---|---|
+| serve / request alias | `qwen3.8:27b-fast` |
+| `/health.model` (resolved) | `qwen3.8:27b-mq4-xt` |
+| target | `/home/willy/.hipfire/models/qwen3.8-27b.mq4r` |
+| target sha256 | `61072980798ac1d3325020a63171d1a9cf99103eaa5bb1675a37845ea7d7762e` |
+| draft | `/home/willy/.hipfire/models/qwen3.8-27b-dflash2-f16.hfq` |
+| draft sha256 | `d466f5b611ca907d61e5d45745a659397244a188e66dfa42341fcc2a6ea8c112` |
+| endpoint | `http://127.0.0.1:11435/v1` |
+
+The serve alias and the health identity are **different strings**. Defaulting the
+readiness check to the serve alias produced a five-minute false timeout, so the
+hook now defaults `AGENTBENCH_HEALTH_MODEL` to the resolved value and the rig
+configs assert it in `identity_probe.require`.
+
+Hipfire's health payload does **not** expose speculation state, so the probe
+attests the resolved target only. Which arm is running is attested by the
+preparation log's config dump.
+
 ## Step 0 — prove the preparation hook by hand
 
 `scripts/prepare-hipfire.sh` is transcribed from the review. Its `hipfire`
 invocations, config keys and `/health` schema are **unconfirmed**. Run each arm
 once by hand before letting the runner drive it:
+
+First, validate the knob mapping without touching the server. This needs no
+Hipfire toolchain and takes a second:
+
+```bash
+./scripts/prepare-hipfire.sh ar --check-knobs && ./scripts/prepare-hipfire.sh dflash2-f16 --check-knobs
+```
+
+It exits non-zero on any axis this hook has no **verified** key for. Three are
+deliberately refused rather than guessed — `speculative_block`, `verify_mode`,
+`prompt_cache_mode` — because mapping a label to a guessed key records a setting
+the server never had.
+
+Then the real thing:
 
 ```bash
 ./scripts/prepare-hipfire.sh ar
@@ -19,11 +56,10 @@ once by hand before letting the runner drive it:
 curl -s http://127.0.0.1:11435/health | jq .
 ```
 
-You are looking for two things. First, that the readiness gate is real: `.model`
-is `qwen3.8:27b-fast` and `.loading_model` is absent. Second, that the field
-names in `configs/engines/ar.json`'s `identity_probe.record` block actually exist
-in that response — `version`, `model_hash`, `draft_model` are guesses. Correct
-them, or the reproducibility fields stay empty and the summary will say so.
+Confirm `.model` is `qwen3.8:27b-mq4-xt` and `.loading_model` is absent. Then
+check the field names in `identity_probe.record` — `version`, `model_hash`,
+`draft_model` — against that response. They are still guesses; correct them or
+the reproducibility fields stay empty and the summary will say so.
 
 Then the other arm, and confirm the drafter is genuinely loaded:
 
@@ -31,10 +67,22 @@ Then the other arm, and confirm the drafter is genuinely loaded:
 ./scripts/prepare-hipfire.sh dflash2-f16
 ```
 
-If `identity_probe.require` can be pointed at a field that distinguishes AR from
-DFlash on your build — a speculation mode, a drafter name — add it. That turns
-the row label from a claim into a checked fact, and the run will abort rather
-than record a mislabelled row.
+If the health payload gains a field that distinguishes AR from DFlash, add it to
+`identity_probe.require`. That turns the row label from a claim into a checked
+fact, and the run aborts rather than recording a mislabelled row.
+
+### What the hook now handles for you
+
+- **Stale daemon reaping.** `hipfire stop` has been seen to kill the foreground
+  serve process while leaving `~/.hipfire/bin/daemon` alive, so the next launch
+  fails with "daemon already running". The hook reaps only that exact managed
+  binary, escalates to SIGKILL, clears stale pidfiles, and **fails closed** if
+  the port is still held by a process it did not start. This matters more than
+  it used to: the live-lane repeat protocol relies on re-preparation between
+  stories, so an intermittently-failing restart silently breaks that guarantee.
+- **PM4 verification is launch-time env**, not a config key. Setting
+  `knobs.pm4_verify` exports `HIPFIRE_DFLASH_VERIFY_PM4=1` for the serve
+  invocation. Not part of the baseline campaign.
 
 ## Step 1 — local gates first
 
@@ -98,6 +146,15 @@ go run ./cmd/agentbench run -lane builder-live -before-engine ./scripts/prepare-
 floor and neither completed a patch; the medium-reasoning AR run is the one that
 reached a compiling tree, which is why the live loop exists. The no-think configs
 are kept unchanged so the closed one-shot experiment stays reproducible.
+
+**Run AR first, read it, then run DFlash.** Not both in one invocation. The point
+of this step is two trajectories a human has looked at, and a failure in the
+first tells you whether the second is worth the time.
+
+**No `context_tokens` on these configs.** The baseline is not a context
+experiment, and pinning an arbitrary capacity adds a variable to an AR-vs-DFlash
+comparison nobody asked a question about. When context is swept deliberately, the
+axis maps to Hipfire's `max_seq`.
 
 **One repetition.** Repeated live stories replay a byte-identical turn 0 against
 a server whose prompt cache the previous repetition filled, so a three-repeat
@@ -174,14 +231,25 @@ probe response shows what the daemon reported at the moment it was prepared.
 4. **§3 telemetry.** `not exposed` is not zero. If the Hipfire columns are all
    `not exposed`, the adapter's provisional key names are wrong — the fix is in
    `internal/client/telemetry.go`, and a wrong guess yields null rather than a
-   fabricated number by design.
+   fabricated number by design. Pass `-server-log ~/.hipfire/serve.log` to pick
+   up what the server writes there instead of the response stream; the parser
+   reads both `key=value` pairs and the parenthetical
+   `(32768 tok, 5593 windows)` form.
 
 ## Not yet in this campaign
 
-The representative **xhigh builder profile**. Every config here is explicit
-no-think, which measures the mechanical builder-performance floor. An `ar-xhigh`
-/ `dflash2-xhigh` pair is closer to the intended autonomous coding workload and
-should be a second sampling pair, not a change to these.
+**Steps 2 and 3 are explicit no-think** and measure the mechanical floor; step 3b
+onward is medium. They are different sampling variants and their rows never
+aggregate — `thinking` is part of every record and the reporter refuses to merge
+across it.
+
+The representative **xhigh builder profile** is a third pair, `ar-xhigh` /
+`dflash2-f16-xhigh`, added as new configs rather than as edits to these. The hook
+already accepts those profile names.
+
+**No engine tuning.** F16 DFlash unchanged; no MQ6/MQ4 drafts, no adaptive block,
+no PM4, no KV changes, until a successful live trajectory exists to optimize
+against.
 
 When it lands, `DecodeTokSDerived` needs revisiting rather than reusing: it is
 completion tokens over the streaming window, and if hidden reasoning precedes

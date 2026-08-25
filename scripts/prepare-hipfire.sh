@@ -32,8 +32,13 @@ set -euo pipefail
 
 ENGINE="${1:?usage: prepare-hipfire.sh <engine-name>}"
 
+# The alias used to SERVE and the identity reported at /health are different
+# strings on this rig: serving `qwen3.8:27b-fast` yields `qwen3.8:27b-mq4-xt`.
+# Defaulting the health identity to the serve alias recreated a five-minute
+# false readiness timeout, so it is defaulted to the value this rig actually
+# reports and overridable for any other.
 MODEL="${AGENTBENCH_MODEL:-qwen3.8:27b-fast}"
-HEALTH_MODEL="${AGENTBENCH_HEALTH_MODEL:-$MODEL}"
+HEALTH_MODEL="${AGENTBENCH_HEALTH_MODEL:-qwen3.8:27b-mq4-xt}"
 HOST="${AGENTBENCH_HOST:-127.0.0.1}"
 PORT="${AGENTBENCH_PORT:-11435}"
 # A knob-supplied draft path wins over the default: that is how a drafter
@@ -59,9 +64,19 @@ case "$ENGINE" in
     ;;
 esac
 
-need hipfire
-need curl
-need jq
+# --check-knobs validates the knob mapping and exits, without touching the
+# server or requiring the Hipfire toolchain. Run it before a campaign to find a
+# refused axis in a second rather than after a model has been prepared.
+CHECK_ONLY=0
+if [[ "${2:-}" == "--check-knobs" ]]; then
+  CHECK_ONLY=1
+fi
+
+if (( ! CHECK_ONLY )); then
+  need hipfire
+  need curl
+  need jq
+fi
 
 # wait_ready blocks until /health reports the target model resident.
 #
@@ -105,20 +120,50 @@ apply_knobs() {
     local val="${!1:-}"
     [[ -n "$val" ]] || return 0
     log "knob $2=$val"
+    if (( CHECK_ONLY )); then
+      return 0
+    fi
     hipfire config "$MODEL" set "$2" "$val"
   }
 
-  set_if AGENTBENCH_KNOB_KV_DTYPE            kv_cache
-  set_if AGENTBENCH_KNOB_SPECULATION_METHOD  speculation
-  set_if AGENTBENCH_KNOB_SPECULATIVE_BLOCK   dflash_block
-  set_if AGENTBENCH_KNOB_SPECULATIVE_BUDGET  dflash_budget
-  set_if AGENTBENCH_KNOB_ADAPTIVE_BLOCK      dflash_adaptive
-  set_if AGENTBENCH_KNOB_VERIFY_MODE         verify_mode
-  set_if AGENTBENCH_KNOB_PM4_VERIFY          verify_pm4
-  set_if AGENTBENCH_KNOB_PREFILL_SPECULATION prefill_compression
-  set_if AGENTBENCH_KNOB_PROMPT_CACHE_MODE   prompt_cache
-  set_if AGENTBENCH_KNOB_PROMPT_CACHE_CAPACITY prompt_cache_capacity
-  set_if AGENTBENCH_KNOB_CONTEXT_TOKENS      context_length
+  # --- verified against the pinned Hipfire's CONFIG.md ---
+  set_if AGENTBENCH_KNOB_KV_DTYPE              kv_cache
+  set_if AGENTBENCH_KNOB_SPECULATION_METHOD    speculation
+  set_if AGENTBENCH_KNOB_PREFILL_SPECULATION   prefill_compression
+  set_if AGENTBENCH_KNOB_CONTEXT_TOKENS        max_seq
+  set_if AGENTBENCH_KNOB_ADAPTIVE_BLOCK        dflash_adaptive_b
+  set_if AGENTBENCH_KNOB_SPECULATIVE_BUDGET    ddtree_budget
+  set_if AGENTBENCH_KNOB_PROMPT_CACHE_CAPACITY memory.prompt_cache_capacity
+
+  # --- launch-time environment, not a per-model config key ---
+  # The retained gfx1201 DFlash verification path is a one-shot env var, not
+  # something `hipfire config set` accepts. Exported here and consumed by the
+  # serve invocation below.
+  if [[ -n "${AGENTBENCH_KNOB_PM4_VERIFY:-}" ]]; then
+    case "$AGENTBENCH_KNOB_PM4_VERIFY" in
+      true|1|on)  export HIPFIRE_DFLASH_VERIFY_PM4=1; log "knob PM4 verify -> HIPFIRE_DFLASH_VERIFY_PM4=1" ;;
+      false|0|off) unset HIPFIRE_DFLASH_VERIFY_PM4 || true; log "knob PM4 verify -> off" ;;
+      *) log "FATAL: PM4_VERIFY must be a boolean, got '$AGENTBENCH_KNOB_PM4_VERIFY'"; return 1 ;;
+    esac
+  fi
+
+  # --- deliberately unmapped: fail closed ---
+  #
+  # These axes exist in RigBench and have no confirmed key on this Hipfire.
+  # Mapping a label to a guessed key would produce a row labelled with a
+  # setting the server never had, which is the failure this whole hook exists
+  # to prevent. Refuse until the real control is identified.
+  for unverified in \
+      AGENTBENCH_KNOB_SPECULATIVE_BLOCK \
+      AGENTBENCH_KNOB_VERIFY_MODE \
+      AGENTBENCH_KNOB_PROMPT_CACHE_MODE; do
+    if [[ -n "${!unverified:-}" ]]; then
+      log "FATAL: ${unverified} is set, but this hook has no VERIFIED Hipfire key for it."
+      log "Identify the real control in CONFIG.md and map it here. Do not guess:"
+      log "a guessed key records a setting the server never had."
+      return 1
+    fi
+  done
 
   # Anything the harness passed that this function does not map is logged and
   # NOT applied. Silently dropping a requested knob would produce a row labelled
@@ -131,6 +176,7 @@ apply_knobs() {
       AGENTBENCH_KNOB_ADAPTIVE_BLOCK|AGENTBENCH_KNOB_VERIFY_MODE|\
       AGENTBENCH_KNOB_PM4_VERIFY|AGENTBENCH_KNOB_PREFILL_SPECULATION|\
       AGENTBENCH_KNOB_PROMPT_CACHE_MODE|AGENTBENCH_KNOB_PROMPT_CACHE_CAPACITY|\
+      AGENTBENCH_KNOB_PROMPT_CACHE_CAPACITY_UNIT|\
       AGENTBENCH_KNOB_CONTEXT_TOKENS|AGENTBENCH_KNOB_TARGET_*|AGENTBENCH_KNOB_DRAFT_*|\
       AGENTBENCH_KNOB_GPU|AGENTBENCH_KNOB_REPLICA_ID|AGENTBENCH_KNOB_MAX_OUTPUT_TOKENS|\
       AGENTBENCH_KNOB_CONCURRENCY) ;;
@@ -151,19 +197,98 @@ common_config() {
   apply_knobs
 }
 
+# stop_hipfire brings the daemon down and PROVES it is down.
+#
+# `hipfire stop` has been observed on this machine to kill the foreground serve
+# process while leaving its child ~/.hipfire/bin/daemon alive, so the next
+# launch fails with "FATAL: hipfire daemon already running". That used to be
+# worked around by a script in /tmp; it belongs here, because v0.3's repeat
+# methodology relies on re-preparation between stories to keep prompt caches
+# from contaminating each other. A lifecycle that intermittently fails to
+# restart silently breaks that guarantee.
+#
+# Fails closed: if anything is still holding the port after the escalation, the
+# run does not proceed.
+stop_hipfire() {
+  local daemon_bin="${HOME}/.hipfire/bin/daemon"
+
+  hipfire stop >/dev/null 2>&1 || true
+
+  # Reap only OUR managed daemon binary. Matching on the word "hipfire" would
+  # also match an operator's editor or this very script.
+  local pids
+  pids="$(pgrep -f "^${daemon_bin}" 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    log "reaping stale daemon child(ren): $(echo "$pids" | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      pgrep -f "^${daemon_bin}" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
+    pids="$(pgrep -f "^${daemon_bin}" 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      log "escalating to SIGKILL for: $(echo "$pids" | tr '\n' ' ')"
+      # shellcheck disable=SC2086
+      kill -9 $pids 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+
+  # Free the port. A listener we did not start is NOT killed: that is somebody
+  # else's process and the run should stop rather than take it down.
+  if command -v lsof >/dev/null 2>&1; then
+    local holders
+    holders="$(lsof -ti "tcp:${PORT}" 2>/dev/null || true)"
+    if [[ -n "$holders" ]]; then
+      log "FATAL: port ${PORT} is still held by pid(s) $(echo "$holders" | tr '\n' ' ')"
+      log "after stopping our daemon. Refusing to kill a process this hook did not start."
+      return 1
+    fi
+  fi
+
+  # Stale pidfiles make the next launch refuse even with nothing running.
+  rm -f "${HOME}/.hipfire/run/"*.pid 2>/dev/null || true
+
+  if pgrep -f "^${daemon_bin}" >/dev/null 2>&1; then
+    log "FATAL: the managed daemon is still alive after stop and kill."
+    return 1
+  fi
+  log "daemon stopped, port ${PORT} free"
+}
+
 log "engine=${ENGINE} model=${MODEL} health_model=${HEALTH_MODEL} endpoint=${HOST}:${PORT}"
 
+if (( CHECK_ONLY )); then
+  # The engine name is validated in check mode too. Returning before the
+  # dispatch below gave a typo'd name a green light, which is the opposite of
+  # what a pre-flight check is for.
+  case "$ENGINE" in
+    ar|ar-medium|ar-xhigh|dflash2-f16|dflash2-f16-medium|dflash2-f16-xhigh) ;;
+    *)
+      log "FATAL: no preparation recipe for engine '${ENGINE}'."
+      exit 2
+      ;;
+  esac
+  apply_knobs
+  log "knob mapping OK for engine '${ENGINE}'"
+  exit 0
+fi
+
 case "$ENGINE" in
-  ar)
-    hipfire stop || true
+  # Display names are accepted alongside preparation profiles: the runner passes
+  # `prepare_profile`, but an operator running this by hand will reach for the
+  # name they saw in the report.
+  ar|ar-medium|ar-xhigh)
+    stop_hipfire
     hipfire config "$MODEL" set dflash_mode off
     common_config
     hipfire serve "$MODEL" "${HOST}:${PORT}" --idle-timeout 0 -d
     ;;
 
-  dflash2-f16)
+  dflash2-f16|dflash2-f16-medium|dflash2-f16-xhigh)
     [[ -r "$DRAFT_F16" ]] || { log "FATAL: drafter not readable at $DRAFT_F16"; exit 2; }
-    hipfire stop || true
+    stop_hipfire
     hipfire config "$MODEL" set dflash_mode on
     common_config
     HIPFIRE_DFLASH_DRAFT="$DRAFT_F16" \

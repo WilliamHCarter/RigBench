@@ -372,19 +372,27 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		hidden = metrics.Gate{Name: scoring.GateHiddenTests, Result: metrics.GateSkipped,
 			Detail: herr.Error()}
 	}
+	// The clock is closed BEFORE the verdict is stamped.
+	//
+	// A story cannot be known hidden-green until the hidden suite has finished,
+	// so a milestone stamped before its duration is added understates itself by
+	// exactly that duration. The final evaluation is tool execution the
+	// benchmark required, so it is in the clock; omitting it entirely made
+	// time_to_hidden_green_ms exceed total_wall_ms, and adding it after the
+	// stamp made the milestone too small instead. Order is the whole fix.
+	story.FinalHiddenWallMS = float64(time.Since(finalHiddenStart).Nanoseconds()) / 1e6
+	story.ToolWallMS += story.FinalHiddenWallMS
+	story.TotalWallMS = story.ModelWallMS + story.ToolWallMS
+
 	story.FinalGates = append(finalGatesOf(story), hidden)
 	story.HiddenGreen = hidden.Result == metrics.GatePass &&
 		metrics.AllPassed(story.FinalGates, scoring.GateBuild, scoring.GateVisibleTests,
 			scoring.GateScope, scoring.GateCandidateTestsDiscriminate)
 	if story.HiddenGreen {
-		story.TimeToHiddenGreenMS = metrics.Ptr(story.ModelWallMS + story.ToolWallMS)
+		// Equal to TotalWallMS by construction: reaching hidden-green is the
+		// last thing a green story does.
+		story.TimeToHiddenGreenMS = metrics.Ptr(story.TotalWallMS)
 	}
-	story.FinalHiddenWallMS = float64(time.Since(finalHiddenStart).Nanoseconds()) / 1e6
-	// The final evaluation is tool execution the benchmark required, so it is in
-	// the clock. Omitting it made time_to_hidden_green_ms exceed total_wall_ms,
-	// which is not a rounding difference but a broken identity.
-	story.ToolWallMS += story.FinalHiddenWallMS
-	story.TotalWallMS = story.ModelWallMS + story.ToolWallMS
 	// Raw elapsed is recorded alongside, so harness overhead is visible as the
 	// difference rather than being invisible or silently folded in.
 	story.ElapsedWallMS = float64(time.Since(storyStart).Nanoseconds()) / 1e6
