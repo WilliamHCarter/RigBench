@@ -33,6 +33,7 @@ set -euo pipefail
 ENGINE="${1:?usage: prepare-hipfire.sh <engine-name>}"
 
 MODEL="${AGENTBENCH_MODEL:-qwen3.8:27b-fast}"
+HEALTH_MODEL="${AGENTBENCH_HEALTH_MODEL:-$MODEL}"
 HOST="${AGENTBENCH_HOST:-127.0.0.1}"
 PORT="${AGENTBENCH_PORT:-11435}"
 DRAFT_F16="${AGENTBENCH_DRAFT_F16:-$HOME/.hipfire/models/qwen3.8-27b-dflash2-f16.hfq}"
@@ -72,7 +73,7 @@ wait_ready() {
     if body="$(curl -fsS --max-time 5 "http://${HOST}:${PORT}/health" 2>/dev/null)"; then
       model="$(printf '%s' "$body" | jq -r '.model // empty')"
       loading="$(printf '%s' "$body" | jq -r '.loading_model // empty')"
-      if [[ -n "$model" && "$model" == "$MODEL" && -z "$loading" ]]; then
+      if [[ -n "$model" && "$model" == "$HEALTH_MODEL" && -z "$loading" ]]; then
         log "ready: model=$model"
         printf '%s\n' "$body" | jq .
         return 0
@@ -83,7 +84,7 @@ wait_ready() {
     fi
     sleep 2
   done
-  log "FATAL: ${MODEL} was not resident after ${READY_TIMEOUT}s"
+  log "FATAL: ${HEALTH_MODEL} was not resident after ${READY_TIMEOUT}s"
   return 1
 }
 
@@ -92,7 +93,7 @@ common_config() {
   hipfire config "$MODEL" set prefill_compression off
 }
 
-log "engine=${ENGINE} model=${MODEL} endpoint=${HOST}:${PORT}"
+log "engine=${ENGINE} model=${MODEL} health_model=${HEALTH_MODEL} endpoint=${HOST}:${PORT}"
 
 case "$ENGINE" in
   ar)
