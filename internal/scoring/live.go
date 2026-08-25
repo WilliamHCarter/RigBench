@@ -54,9 +54,21 @@ type TurnResult struct {
 	Done bool
 	// ToolWall is the host-side time this turn cost.
 	ToolWall time.Duration
-	// Compiles and DiscriminatingGreen are the milestone flags the story tracks.
+	// Compiles and DiscriminatingGreen are milestone flags the story records.
+	//
+	// DiscriminatingGreen deliberately excludes scope: it marks the turn at
+	// which the implementation and its tests became load-bearing, which is a
+	// question about the code and not about which files were touched.
 	Compiles            bool
 	DiscriminatingGreen bool
+	// ReadyForFinal is the stop predicate, and it is NOT the same flag.
+	//
+	// Story success requires build, visible, discrimination, scope AND hidden.
+	// Stopping on DiscriminatingGreen alone would terminate a story whose only
+	// remaining defect is a stray out-of-scope edit -- with the host's own
+	// "revert those files" feedback computed, formatted, and then never sent.
+	// That is precisely the repair the live loop exists to enable.
+	ReadyForFinal bool
 }
 
 const doneSentinel = "DONE"
@@ -113,10 +125,11 @@ func ScoreLiveTurn(ctx context.Context, in TurnInput) (*TurnResult, error) {
 		// The tree is unchanged, and the model is told so explicitly: without
 		// that it may assume its previous turn landed and send a delta against
 		// a tree that never existed.
-		res.Feedback = "HOST: your diff did not apply. The working tree is UNCHANGED " +
-			"and still reflects your previous turns only.\n\n$ git apply\n" +
-			executor.TruncateMiddle(
-				executor.Sanitize(ap.Combined(), in.Worktree.Dir), in.MaxToolOutputBytes) + "\n"
+		res.Feedback = executor.TruncateMiddle(
+			"HOST: your diff did not apply. The working tree is UNCHANGED and still "+
+				"reflects your previous turns only.\n\n$ git apply\n"+
+				executor.Sanitize(ap.Combined(), in.Worktree.Dir)+"\n",
+			in.MaxToolOutputBytes)
 		return res, nil
 	}
 	res.Applied = true
@@ -156,6 +169,8 @@ func ScoreLiveTurn(ctx context.Context, in TurnInput) (*TurnResult, error) {
 	}, changed, writeLog)
 	res.Gates = append(res.Gates, dg)
 	res.DiscriminatingGreen = visible.OK() && dg.Result == metrics.GatePass
+	res.ReadyForFinal = res.DiscriminatingGreen &&
+		build.OK() && scope.Result == metrics.GatePass
 	if dg.Result == metrics.GateFail {
 		fmt.Fprintf(&feedback, "\nHOST CHECK: %s\n%s\n",
 			GateCandidateTestsDiscriminate, dg.Detail)
@@ -199,23 +214,37 @@ func declaresDone(out string) bool {
 	return false
 }
 
+// appendRung adds one command's result to the feedback under construction.
+//
+// It does not truncate: the cap belongs to the whole feedback block and is
+// applied once, by trimFeedback. Truncating per command let a two-command turn
+// send twice the configured ceiling.
 func appendRung(b *strings.Builder, in TurnInput, r *executor.CommandResult) {
 	fmt.Fprintf(b, "$ %s\nexit %d\n\n%s\n",
 		strings.Join(r.Argv, " "), r.ExitCode,
-		executor.TruncateMiddle(
-			executor.Sanitize(strings.TrimSpace(r.Combined()), in.Worktree.Dir),
-			in.MaxToolOutputBytes))
+		executor.Sanitize(strings.TrimSpace(r.Combined()), in.Worktree.Dir))
 }
 
 // trimFeedback prepends a scope violation, which the model must be told about
 // even when everything compiled: a patch that edits a frozen golden is a
 // failure the build cannot see.
+// trimFeedback prepends a scope violation and applies the single output cap.
+//
+// The scope note goes first, and before truncation, because a patch that edits
+// a frozen golden is a failure the build cannot see -- it must not be the thing
+// that gets elided out of the middle of a long build log.
+//
+// The cap is the lane's max_tool_output_bytes over the WHOLE block. It used to
+// be applied per command and then again at double the ceiling, so a 16 KiB lane
+// could send 32 KiB. Tool-result size drives the next turn's prompt size,
+// prefill work, cache shape and wall clock, so a cap that is not the configured
+// cap is a measurement error, not a formatting detail.
 func trimFeedback(body string, scope metrics.Gate, in TurnInput) string {
 	if scope.Result == metrics.GateFail {
 		body = fmt.Sprintf("HOST CHECK: scope violation. %s\nThose files are not yours to "+
 			"change; revert them.\n\n%s", scope.Detail, body)
 	}
-	return executor.TruncateMiddle(body, in.MaxToolOutputBytes*2)
+	return executor.TruncateMiddle(body, in.MaxToolOutputBytes)
 }
 
 func logWriter(dir, prefix, turnPrefix string) func(string, *executor.CommandResult) string {

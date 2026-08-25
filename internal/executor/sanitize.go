@@ -53,8 +53,8 @@ var sanitizers = []struct {
 	{regexp.MustCompile(`-Z[0-9a-f]{8,}`), "-Z<id>"},
 }
 
-// TruncateMiddle shortens output to at most n bytes, keeping the head and the
-// tail and saying how much was dropped.
+// TruncateMiddle shortens output to at most n bytes total, marker included,
+// keeping the head and the tail and saying how much was dropped.
 //
 // The head carries the first error, which is usually the real one; the tail
 // carries the summary and the exit status. The middle of a long build log is
@@ -66,8 +66,18 @@ func TruncateMiddle(s string, n int) string {
 		return s
 	}
 	const marker = "\n\n... [%d bytes elided by the benchmark harness] ...\n\n"
-	head := n * 2 / 3
-	tail := n - head
+	// The marker counts against the budget. A cap that is exceeded by however
+	// long the explanation happens to be is not a cap, and this one feeds
+	// directly into the next turn's prompt size.
+	reserve := len(fmt.Sprintf(marker, len(s)))
+	budget := n - reserve
+	if budget < 2 {
+		// No room for head, tail and an honest explanation. Say so rather than
+		// returning a silently over-budget string.
+		return fmt.Sprintf("... [%d bytes elided by the benchmark harness] ...", len(s))
+	}
+	head := budget * 2 / 3
+	tail := budget - head
 	dropped := len(s) - head - tail
 	if dropped <= 0 {
 		return s

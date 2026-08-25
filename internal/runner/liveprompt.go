@@ -103,6 +103,14 @@ type liveContext struct {
 	SharedTokens   int
 	AppendedTokens int
 	ReusableTokens int
+	// AppendedBytes is this turn's prompt growth. The record has always
+	// declared the field; the live path never filled it, so every live row
+	// reported zero growth while the report printed it as prompt-growth
+	// telemetry.
+	AppendedBytes int
+	// Thermal overrides the run's declared class for this turn. Only turn 0 of
+	// a cold story is cold; the turns after it hit a resident server.
+	Thermal string
 	// LogTelemetry is what the engine wrote to its own log during this request.
 	LogTelemetry client.Telemetry
 }
@@ -181,7 +189,8 @@ func liveRecord(o LiveOptions, m *prompt.Manifest, res *client.Result,
 		ReplicaID:          e.Knobs.ReplicaID,
 		GPU:                e.Knobs.GPU,
 
-		Thermal:         o.Thermal,
+		Thermal:         lc.Thermal,
+		AppendedBytes:   lc.AppendedBytes,
 		OutputSHA256:    res.OutputSHA256,
 		OutputBytes:     res.OutputBytes,
 		TransportStatus: res.TransportStatus,

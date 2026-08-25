@@ -67,3 +67,27 @@ func TestTruncateMiddleLeavesShortOutputAlone(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// The cap must be a cap. Tool-result size drives the next turn's prompt size,
+// prefill work, cache shape and wall clock, so an output that exceeds its
+// configured ceiling by however long the elision marker happens to be is a
+// measurement error rather than a formatting detail.
+func TestTruncateMiddleRespectsTheBudgetIncludingItsOwnMarker(t *testing.T) {
+	for _, n := range []int{80, 200, 1000, 16384} {
+		s := strings.Repeat("x", n*4)
+		got := TruncateMiddle(s, n)
+		if len(got) > n {
+			t.Fatalf("cap %d produced %d bytes", n, len(got))
+		}
+		if !strings.Contains(got, "elided") {
+			t.Fatalf("cap %d truncated silently", n)
+		}
+	}
+}
+
+func TestTruncateMiddleWithNoRoomForAMarkerStillSaysSo(t *testing.T) {
+	got := TruncateMiddle(strings.Repeat("x", 5000), 20)
+	if !strings.Contains(got, "elided") {
+		t.Fatalf("silent truncation: %q", got)
+	}
+}

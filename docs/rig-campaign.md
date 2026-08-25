@@ -81,6 +81,46 @@ first request is sent, and pinned by tests in `cmd/agentbench/schedule_test.go`.
 go run ./cmd/agentbench run -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/ar.json,configs/engines/dflash2.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -warmup 1 -repeats 3
 ```
 
+## Step 3b — the FIRST live probe: one story each, inspected by hand
+
+Before any statistical run. The point is to read two trajectories, not to
+collect a median.
+
+```bash
+go run ./cmd/agentbench run -lane builder-live -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/ar-medium-live.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -repeats 1 -server-log ~/.hipfire/serve.log
+```
+
+```bash
+go run ./cmd/agentbench run -lane builder-live -before-engine ./scripts/prepare-hipfire.sh -engines configs/engines/dflash2-f16-medium-live.json -endpoint http://127.0.0.1:11435/v1 -thermal steady -repeats 1 -server-log ~/.hipfire/serve.log
+```
+
+**Medium reasoning, not no-think.** The no-think configs measured the mechanical
+floor and neither completed a patch; the medium-reasoning AR run is the one that
+reached a compiling tree, which is why the live loop exists. The no-think configs
+are kept unchanged so the closed one-shot experiment stays reproducible.
+
+**One repetition.** Repeated live stories replay a byte-identical turn 0 against
+a server whose prompt cache the previous repetition filled, so a three-repeat
+median can become one story plus two cached replays. The runner refuses
+`-repeats > 1` on a live lane without `-before-engine`, and re-prepares between
+repetitions when there is one — but establish that a trajectory succeeds at all
+before spending time on statistics.
+
+**No `-warmup`.** It is refused on a live lane. Priming with the one-shot prompt
+measures a different workload; priming with the live prompt fills the cache with
+the story about to be measured. Residency comes from the preparation hook.
+
+Read `story.json` first, then the per-turn prompts and diffs under
+`artifacts/<slug>/t*/`. What to look for:
+
+- did turn 0 produce a diff at all, and did it apply?
+- what does `turn_role` / `turn_max_tokens` / `finish_reason` say — is the model
+  hitting the per-turn ceiling, or stopping naturally?
+- does `time_to_discriminating_green` ever get set, or does the loop end at
+  `turn budget exhausted`?
+- `cache` per turn: is the engine reporting reuse, and does it track the
+  runner's own `shared_with_previous_tokens`?
+
 ## Step 4 — the four-turn trajectory, cache-friendly layout
 
 The first genuinely relevant result: total builder trajectory time, turn-by-turn

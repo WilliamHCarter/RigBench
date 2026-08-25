@@ -46,16 +46,40 @@ type Story struct {
 	// --- the verdict ---
 	// HiddenGreen is the only success condition. Everything else is diagnosis.
 	HiddenGreen bool `json:"hidden_green"`
-	// StopReason says why the loop ended: done, discriminating-green,
-	// max-turns, max-wall, no-diff, apply-failed, transport. A story that ran
-	// out of turns and one that finished are not the same result.
+	// StopReason says why the loop ended: the model declared done, the host
+	// found the tree ready for final evaluation, the turn budget ran out, the
+	// wall-clock budget ran out, the model returned no diff twice, or the
+	// transport failed. A story that ran out of turns and one that finished are
+	// not the same result.
+	//
+	// There is deliberately no apply-failed stop: a diff that does not apply is
+	// repairable, and the loop exists to let the model repair it.
 	StopReason string `json:"stop_reason"`
 	// FinalGates is the gate set as of the last turn, hidden suite included.
 	FinalGates []Gate `json:"final_gates"`
 
 	// --- the clock, decomposed ---
 	ModelWallMS float64 `json:"model_wall_ms"`
-	ToolWallMS  float64 `json:"tool_wall_ms"`
+	// ToolWallMS is every piece of host-side execution the benchmark required:
+	// patch application, build, tests, the candidate-test discrimination gate,
+	// any diagnostic leak, and the final hidden evaluation. Omitting the last
+	// of those made time_to_hidden_green_ms exceed total_wall_ms, which is not
+	// a rounding difference but a broken identity.
+	ToolWallMS float64 `json:"tool_wall_ms"`
+	// FinalHiddenWallMS is the once-per-story hidden evaluation, broken out
+	// because it is benchmark grading rather than agent work. It is included in
+	// ToolWallMS.
+	FinalHiddenWallMS float64 `json:"final_hidden_wall_ms"`
+	// DiagnosticLeakWallMS is the extra hidden run the diagnostic lane performs.
+	// Zero for the canonical lane, and included in ToolWallMS when non-zero.
+	DiagnosticLeakWallMS float64 `json:"diagnostic_leak_wall_ms"`
+	// ElapsedWallMS is raw wall time from the story's first request to its last
+	// evaluation. HarnessOverheadMS is the difference between that and
+	// TotalWallMS -- prompt serialization, artifact writing, worktree staging.
+	// Recorded so the overhead is visible as a number rather than being either
+	// invisible or silently folded into the benchmark's own result.
+	ElapsedWallMS     float64 `json:"elapsed_wall_ms"`
+	HarnessOverheadMS float64 `json:"harness_overhead_ms"`
 	// TotalWallMS is the story's critical path: model time plus tool time.
 	// Harness overhead outside those two is excluded and is not measured.
 	TotalWallMS float64 `json:"total_wall_ms"`
@@ -73,6 +97,11 @@ type Story struct {
 	// --- milestones, measured from the story's first request ---
 	// Each is null when never reached, never zero: a story that never compiled
 	// and one that compiled instantly are not the same story.
+	//
+	// Measured in the SAME accounting as TotalWallMS -- model time plus tool
+	// time, harness overhead excluded -- so a milestone can be compared against
+	// the total it is part of. Stamping them from raw elapsed made
+	// time_to_hidden_green_ms exceed total_wall_ms.
 	TimeToFirstCompilingPatchMS *float64 `json:"time_to_first_compiling_patch_ms"`
 	// TimeToDiscriminatingGreenMS is the first turn at which the visible rung
 	// AND the candidate-test discrimination gate both pass. Deliberately not
@@ -158,8 +187,13 @@ type TaskMetrics struct {
 
 	ToolWallMS  float64 `json:"tool_wall_ms"`
 	ModelWallMS float64 `json:"model_wall_ms"`
-	// TotalStoryWallMS is the north star: model time plus tool time.
+	// TotalStoryWallMS is the north star: model time plus every piece of tool
+	// execution the benchmark required, the final hidden evaluation included.
+	// The identity total == model + tool always holds.
 	TotalStoryWallMS float64 `json:"total_story_wall_ms"`
+	// FinalHiddenWallMS is broken out of ToolWallMS so grading time can be
+	// separated from agent time when that is the question.
+	FinalHiddenWallMS float64 `json:"final_hidden_wall_ms"`
 
 	TimeToFirstCompilingPatchMS *float64 `json:"time_to_first_compiling_patch_ms"`
 	// TimeToDiscriminatingGreenMS replaces what a spec would naturally call

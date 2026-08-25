@@ -176,8 +176,16 @@ func (f *Fixture) LoadLane(name string) (*Lane, error) {
 	if l.MaxToolOutputBytes <= 0 {
 		l.MaxToolOutputBytes = 16384
 	}
-	if l.LeakHiddenAfterTurn != nil && *l.LeakHiddenAfterTurn < 0 {
-		return nil, fmt.Errorf("lane %s: leak_hidden_after_turn must be null or >= 0", name)
+	if l.LeakHiddenAfterTurn != nil {
+		if *l.LeakHiddenAfterTurn < 0 {
+			return nil, fmt.Errorf("lane %s: leak_hidden_after_turn must be null or >= 0", name)
+		}
+		if *l.LeakHiddenAfterTurn >= l.MaxTurns {
+			return nil, fmt.Errorf("lane %s: leak_hidden_after_turn is %d but max_turns is %d, "+
+				"so the leak can never happen. A lane that calls itself diagnostic and never "+
+				"shows the model anything is worse than one that does not claim to",
+				name, *l.LeakHiddenAfterTurn, l.MaxTurns)
+		}
 	}
 	for what, v := range map[string]int{
 		"initial": l.TurnLimits.Initial, "repair": l.TurnLimits.Repair, "final": l.TurnLimits.Final,

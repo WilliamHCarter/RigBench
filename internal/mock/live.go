@@ -52,10 +52,21 @@ const (
 	// LiveImmediateDone declares completion on turn 0 without doing anything.
 	// The host must still run the hidden suite and must still fail the story.
 	LiveImmediateDone LiveVariant = "live-immediate-done"
+	// LiveScopeThenRepair implements everything correctly on turn 0 AND touches
+	// one out-of-scope file. Build, visible and the discrimination gate all
+	// pass; only scope is red. A loop that stopped on discrimination alone would
+	// terminate this story as a failure with the host's own "revert those files"
+	// feedback computed and never sent. Turn 1 reverts it.
+	LiveScopeThenRepair LiveVariant = "live-scope-then-repair"
+	// LiveApplyFailThenRecover sends a corrupted diff on turn 0 and a good one
+	// on turn 1. The tree must be unchanged after the failure and the story must
+	// still converge.
+	LiveApplyFailThenRecover LiveVariant = "live-apply-fail-then-recover"
 )
 
 var AllLiveVariants = []LiveVariant{
 	LiveConverges, LiveStuck, LiveNoDiff, LiveImmediateDone,
+	LiveScopeThenRepair, LiveApplyFailThenRecover,
 }
 
 // BuildLiveScript generates the scripted turns for a variant.
@@ -69,6 +80,13 @@ func BuildLiveScript(ctx context.Context, f *config.Fixture, v LiveVariant, stag
 		}}, nil
 	case LiveImmediateDone:
 		return LiveScript{Loop: true, Turns: []string{"DONE\n"}}, nil
+	}
+
+	if v == LiveScopeThenRepair {
+		return scopeThenRepairScript(ctx, f, stageDir)
+	}
+	if v == LiveApplyFailThenRecover {
+		return applyFailThenRecoverScript(ctx, f, stageDir)
 	}
 
 	// Turn 0: the new files, wired into nothing. This is deliberately the
@@ -128,4 +146,70 @@ func BuildLiveScript(ctx context.Context, f *config.Fixture, v LiveVariant, stag
 
 func fence(patch, note string) string {
 	return "```diff\n" + patch + "```\n\n" + note + "\n"
+}
+
+// scopeThenRepairScript produces a correct implementation that also edits one
+// out-of-scope file, then a turn that reverts only that edit.
+func scopeThenRepairScript(ctx context.Context, f *config.Fixture, stageDir string) (LiveScript, error) {
+	wt, err := executor.Stage(ctx, f, filepath.Join(stageDir, "scope"), false)
+	if err != nil {
+		return LiveScript{}, err
+	}
+	if err := overlay(f.Path(f.ReferenceDir), wt.Dir); err != nil {
+		return LiveScript{}, err
+	}
+	// AGENTS.md is explicitly forbidden by the fixture and is not something the
+	// build can see. Exactly the defect the scope gate exists for.
+	doctrine := filepath.Join(wt.Dir, "AGENTS.md")
+	orig, err := os.ReadFile(doctrine)
+	if err != nil {
+		return LiveScript{}, err
+	}
+	if err := os.WriteFile(doctrine, append(orig, []byte("\n<!-- clarified while implementing -->\n")...), 0o644); err != nil {
+		return LiveScript{}, err
+	}
+	t0, err := wt.Diff(ctx)
+	if err != nil {
+		return LiveScript{}, err
+	}
+
+	if err := wt.Commit(ctx, "turn 0"); err != nil {
+		return LiveScript{}, err
+	}
+	if err := os.WriteFile(doctrine, orig, 0o644); err != nil {
+		return LiveScript{}, err
+	}
+	t1, err := wt.Diff(ctx)
+	if err != nil {
+		return LiveScript{}, err
+	}
+	if t1 == "" {
+		return LiveScript{}, fmt.Errorf("mock: the scope repair turn is empty")
+	}
+	return LiveScript{Turns: []string{
+		fence(t0, "Implemented the seam and clarified a line of AGENTS.md while reading it."),
+		fence(t1, "Reverted the AGENTS.md edit.\nAddresses: scope"),
+		"DONE\n",
+	}}, nil
+}
+
+// applyFailThenRecoverScript sends a diff whose hunk header is corrupted, then
+// a good one. The tree must be untouched by the first.
+func applyFailThenRecoverScript(ctx context.Context, f *config.Fixture, stageDir string) (LiveScript, error) {
+	wt, err := executor.Stage(ctx, f, filepath.Join(stageDir, "applyfail"), false)
+	if err != nil {
+		return LiveScript{}, err
+	}
+	if err := overlay(f.Path(f.ReferenceDir), wt.Dir); err != nil {
+		return LiveScript{}, err
+	}
+	good, err := wt.Diff(ctx)
+	if err != nil {
+		return LiveScript{}, err
+	}
+	return LiveScript{Turns: []string{
+		fence(corruptHunkHeader(good), "Implemented the seam."),
+		fence(good, "Resent the diff after the host reported it did not apply.\nAddresses: patch_applies"),
+		"DONE\n",
+	}}, nil
 }

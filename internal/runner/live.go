@@ -46,7 +46,7 @@ type LiveResult struct {
 // stop reasons
 const (
 	stopDone           = "model declared done"
-	stopDiscriminating = "visible rung and discrimination gate both green"
+	stopReadyForFinal  = "build, visible, scope and discrimination gate all green"
 	stopMaxTurns       = "turn budget exhausted"
 	stopMaxWall        = "wall-clock budget exhausted"
 	stopTransport      = "transport failure"
@@ -102,8 +102,24 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 	consecutiveNoDiff := 0
 	storyStart := time.Now()
 
+	// The agent budget is a real deadline, not a check between turns.
+	//
+	// Checking only before starting a turn let a story that had 10 seconds left
+	// begin a request with its own 900-second timeout and then run build and
+	// test commands with theirs -- sailing past a declared 3600-second budget by
+	// most of an hour. The budget now cancels the model request and every tool
+	// command in the loop.
+	//
+	// The FINAL hidden evaluation is deliberately outside it: that is the
+	// benchmark grading the result, not the agent working, and a story must not
+	// be recorded as un-graded because the agent used all its time. `ctx` rather
+	// than `agentCtx` is used for it below, and the lane comment says so.
+	agentCtx, cancelAgent := context.WithTimeout(ctx,
+		time.Duration(lane.MaxWallSeconds)*time.Second)
+	defer cancelAgent()
+
 	for turn := 0; turn < lane.MaxTurns; turn++ {
-		if elapsed := time.Since(storyStart); elapsed > time.Duration(lane.MaxWallSeconds)*time.Second {
+		if agentCtx.Err() != nil {
 			story.StopReason = stopMaxWall
 			break
 		}
@@ -135,7 +151,7 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		}
 
 		o.ServerLog.Mark()
-		res := c.Complete(ctx, client.Request{
+		res := c.Complete(agentCtx, client.Request{
 			Model: e.Model, Messages: m.Messages,
 			Temperature: e.Sampling.Temperature, MaxTokens: maxTokens,
 			Seed: e.Sampling.Seed, TopP: e.Sampling.TopP,
@@ -155,9 +171,20 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		}
 
 		shared, appended := turnReuse(prev, m)
+		appendedBytes := 0
+		if prev != nil {
+			appendedBytes = m.PromptBytes - prev.PromptBytes
+		}
+		// Only turn 0 of a cold story is cold. Copying the run's declared class
+		// onto every turn labelled a resident-server turn as a cold one.
+		turnThermal := o.Thermal
+		if o.Thermal == "cold" && turn > 0 {
+			turnThermal = "warm-resident"
+		}
 		rec := liveRecord(o, m, res, adapter, liveContext{
 			Turn: turn, TurnRole: turnRole, TurnMaxTokens: maxTokens,
 			SharedTokens: shared, AppendedTokens: appended,
+			AppendedBytes: appendedBytes, Thermal: turnThermal,
 			ReusableTokens: o.Tokenizer.Count(prompt.Canonical(m.Messages)[:m.StablePrefixBytes]),
 			LogTelemetry:   logTel,
 		})
@@ -168,6 +195,21 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		story.PromptTokensFinal = rec.PromptTokens
 
 		if res.TransportStatus != metrics.TransportOK {
+			if agentCtx.Err() != nil {
+				// The deadline cancelled the request. That is the budget doing
+				// its job, not the transport failing, and the two must not
+				// aggregate together -- so the gate is named for the budget and
+				// the transport error is kept as its detail.
+				story.StopReason = stopMaxWall
+				rec.Scored = false
+				rec.Quality = &metrics.Quality{Passed: false, Gates: []metrics.Gate{{
+					Name: "wall_budget", Result: metrics.GateFail,
+					Detail: fmt.Sprintf("the agent's %ds budget cancelled this request (%s)",
+						lane.MaxWallSeconds, res.TransportStatus),
+				}}}
+				out.Records = append(out.Records, rec)
+				break
+			}
 			rec.Scored = true
 			rec.Quality = &metrics.Quality{Passed: false, Gates: []metrics.Gate{{
 				Name: "transport", Result: metrics.GateFail,
@@ -178,7 +220,7 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 			break
 		}
 
-		tr, err := scoring.ScoreLiveTurn(ctx, scoring.TurnInput{
+		tr, err := scoring.ScoreLiveTurn(agentCtx, scoring.TurnInput{
 			Fixture: f, Worktree: wt, Output: res.Visible, Turn: turn,
 			ArtifactDir: turnArt, ArtifactPrefix: filepath.ToSlash(filepath.Join(artPrefix, fmt.Sprintf("t%d", turn))),
 			DiscriminateDir:    filepath.Join(o.WorkDir, slug+fmt.Sprintf(".discriminate.t%d", turn)),
@@ -191,7 +233,13 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 
 		rec.ToolWallMS = float64(tr.ToolWall.Nanoseconds()) / 1e6
 		rec.PatchApplied = tr.Applied
-		rec.Scored = true
+		// An intermediate repair turn is NOT an independent quality trial: a
+		// failing turn 0 followed by a repairing turn 1 is one successful
+		// story, and counting it as one pass and one failure would report a
+		// green three-turn story as 33% passing. The gates are retained on the
+		// StoryTurn, where they are diagnosis rather than verdict. Only the
+		// final record carries the story's verdict, set below.
+		rec.Scored = false
 		rec.Quality = &metrics.Quality{Gates: tr.Gates, PatchFiles: tr.PatchFiles}
 		story.ToolWallMS += rec.ToolWallMS
 		out.Records = append(out.Records, rec)
@@ -222,13 +270,22 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 			consecutiveNoDiff = 0
 		}
 
-		elapsed := float64(time.Since(storyStart).Nanoseconds()) / 1e6
+		// Milestones are stamped from the SAME accounting as total_wall_ms --
+		// model time plus tool time -- not from raw elapsed wall.
+		//
+		// Stamping them from time.Since(storyStart) made
+		// time_to_hidden_green_ms exceed the total_wall_ms it is supposedly
+		// part of, by however much harness overhead had accumulated. Two
+		// clocks that cannot be compared are worse than one that is slightly
+		// incomplete, and this benchmark's own definition of the total is
+		// model + tool.
+		accounted := story.ModelWallMS + story.ToolWallMS
 		if tr.Compiles && story.TimeToFirstCompilingPatchMS == nil {
-			story.TimeToFirstCompilingPatchMS = metrics.Ptr(elapsed)
+			story.TimeToFirstCompilingPatchMS = metrics.Ptr(accounted)
 			story.TurnAtFirstCompile = metrics.Ptr(turn)
 		}
 		if tr.DiscriminatingGreen && story.TimeToDiscriminatingGreenMS == nil {
-			story.TimeToDiscriminatingGreenMS = metrics.Ptr(elapsed)
+			story.TimeToDiscriminatingGreenMS = metrics.Ptr(accounted)
 			story.TurnAtDiscriminatingGreen = metrics.Ptr(turn)
 		}
 		story.Turns = append(story.Turns, st)
@@ -237,8 +294,12 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 			story.StopReason = stopDone
 			break
 		}
-		if lane.StopWhenDiscriminatingGreen && tr.DiscriminatingGreen {
-			story.StopReason = stopDiscriminating
+		// Stops on ReadyForFinal, which includes scope. Stopping on
+		// DiscriminatingGreen alone terminated a story whose only remaining
+		// defect was a stray out-of-scope edit, with the host's own "revert
+		// those files" feedback computed and then never sent.
+		if lane.StopWhenDiscriminatingGreen && tr.ReadyForFinal {
+			story.StopReason = stopReadyForFinal
 			break
 		}
 		if consecutiveNoDiff >= 2 {
@@ -257,7 +318,8 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		// Marked in the story, because a story that saw the oracle is not
 		// comparable with one that did not.
 		if lane.LeakHiddenAfterTurn != nil && *lane.LeakHiddenAfterTurn == turn {
-			g, raw, herr := scoring.ScoreHiddenFinal(ctx, scoring.TurnInput{
+			leakStart := time.Now()
+			g, raw, herr := scoring.ScoreHiddenFinal(agentCtx, scoring.TurnInput{
 				Fixture: f, Worktree: wt,
 				ArtifactDir:        turnArt,
 				ArtifactPrefix:     filepath.ToSlash(filepath.Join(artPrefix, fmt.Sprintf("t%d", turn))),
@@ -270,9 +332,14 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 					"$ zig build test-hidden\n" + raw + "\n"
 			}
 			// Remove it again so the next turn's visible rung does not compile it.
-			if rerr := restoreHiddenPlaceholder(ctx, f, wt); rerr != nil {
+			if rerr := restoreHiddenPlaceholder(agentCtx, f, wt); rerr != nil {
 				return nil, rerr
 			}
+			// The leaked evaluation and the restore are benchmark-required tool
+			// execution and belong in the story's clock like any other.
+			leakMS := float64(time.Since(leakStart).Nanoseconds()) / 1e6
+			story.ToolWallMS += leakMS
+			story.DiagnosticLeakWallMS += leakMS
 		}
 
 		if strings.TrimSpace(feedback) != "" {
@@ -291,6 +358,11 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 	}
 
 	// The hidden suite runs exactly once, now that the loop has stopped.
+	//
+	// Uses `ctx`, not `agentCtx`: a story that exhausted its agent budget must
+	// still be graded, or "ran out of time" and "was never evaluated" would
+	// become the same record.
+	finalHiddenStart := time.Now()
 	hidden, _, herr := scoring.ScoreHiddenFinal(ctx, scoring.TurnInput{
 		Fixture: f, Worktree: wt,
 		ArtifactDir: artDir, ArtifactPrefix: artPrefix,
@@ -305,9 +377,18 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 		metrics.AllPassed(story.FinalGates, scoring.GateBuild, scoring.GateVisibleTests,
 			scoring.GateScope, scoring.GateCandidateTestsDiscriminate)
 	if story.HiddenGreen {
-		story.TimeToHiddenGreenMS = metrics.Ptr(float64(time.Since(storyStart).Nanoseconds()) / 1e6)
+		story.TimeToHiddenGreenMS = metrics.Ptr(story.ModelWallMS + story.ToolWallMS)
 	}
+	story.FinalHiddenWallMS = float64(time.Since(finalHiddenStart).Nanoseconds()) / 1e6
+	// The final evaluation is tool execution the benchmark required, so it is in
+	// the clock. Omitting it made time_to_hidden_green_ms exceed total_wall_ms,
+	// which is not a rounding difference but a broken identity.
+	story.ToolWallMS += story.FinalHiddenWallMS
 	story.TotalWallMS = story.ModelWallMS + story.ToolWallMS
+	// Raw elapsed is recorded alongside, so harness overhead is visible as the
+	// difference rather than being invisible or silently folded in.
+	story.ElapsedWallMS = float64(time.Since(storyStart).Nanoseconds()) / 1e6
+	story.HarnessOverheadMS = story.ElapsedWallMS - story.TotalWallMS
 	story.Experiment = metrics.StoryExperiment{
 		Family:   e.Experiment.Family,
 		Variant:  e.Experiment.Variant,
@@ -315,10 +396,21 @@ func RunLive(ctx context.Context, o LiveOptions) (*LiveResult, error) {
 	}
 	story.Rollup(out.Records)
 
+	// Trajectory length is only known once the loop has stopped.
+	for _, r := range out.Records {
+		r.TurnCount = len(out.Records)
+	}
+
 	if len(out.Records) > 0 {
 		last := out.Records[len(out.Records)-1]
+		if last.Quality == nil {
+			// A story cancelled mid-request still gets graded, so its final
+			// record still needs somewhere to carry the verdict.
+			last.Quality = &metrics.Quality{}
+		}
 		last.Quality.Gates = append(last.Quality.Gates, hidden)
 		last.Quality.Passed = story.HiddenGreen
+		last.Scored = true
 	}
 	return out, nil
 }
@@ -338,16 +430,14 @@ func finalGatesOf(s *metrics.Story) []metrics.Gate {
 // leak, so the next turn's `zig build test` does not compile the oracle.
 func restoreHiddenPlaceholder(ctx context.Context, f *config.Fixture, wt *executor.Worktree) error {
 	dst := filepath.Join(wt.Dir, "hidden")
-	entries, err := os.ReadDir(dst)
-	if err != nil {
+	// Removed wholesale rather than file by file: skipping directories would
+	// leave oracle content behind the moment a hidden suite grows a subdirectory,
+	// and it would leave it somewhere the next turn's build compiles.
+	if err := os.RemoveAll(dst); err != nil {
 		return err
 	}
-	for _, en := range entries {
-		if !en.IsDir() {
-			if err := os.Remove(filepath.Join(dst, en.Name())); err != nil {
-				return err
-			}
-		}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
 	}
 	src := filepath.Join(f.Path(f.RepoDir), "hidden")
 	srcEntries, err := os.ReadDir(src)
@@ -389,12 +479,27 @@ func turnReuse(prev, cur *prompt.Manifest) (shared, appended int) {
 	return shared, appended
 }
 
+// nextObjective is deliberately state-neutral.
+//
+// It used to assert "the host applied your diff and ran the build", which
+// directly contradicted the host's own message on a turn where the diff did not
+// apply or no diff was found. A model told in one breath that its tree is
+// unchanged and in the next that its diff was applied has been handed
+// contradictory state, and it will act on one of them.
+//
+// It also no longer promises "exact output": that output is sanitized of
+// host-specific bytes and truncated with an explicit marker, and the contract
+// should describe what is actually sent.
 func nextObjective(turn int) string {
 	return fmt.Sprintf("TURN %d — current objective\n\n"+
-		"The host applied your diff and ran the build. Its exact output is above.\n\n"+
-		"Diagnose only the failures reported there and return the next bounded repair\n"+
-		"as one fenced diff. Send only the delta; do not repeat unchanged files.\n\n"+
-		"If the build is green and the work is complete, return DONE instead.\n", turn)
+		"The host result above is authoritative, including whether anything was\n"+
+		"applied. It is the host's own output, sanitized of machine-specific paths\n"+
+		"and truncated where marked. The working tree persists exactly as the host\n"+
+		"described it.\n\n"+
+		"Diagnose only what the host reported and return the next bounded repair as\n"+
+		"one fenced diff. Send only the delta; do not repeat unchanged files.\n\n"+
+		"If the host reports the tree is green and the work is complete, return DONE\n"+
+		"instead.\n", turn)
 }
 
 func addTokens(dst **int, v *int) {

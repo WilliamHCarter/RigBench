@@ -20,6 +20,7 @@ wins on the benchmark while meeting the benchmark's quality gates.
 | v0.2.3 — gate stack controls + toolchain pin | complete |
 | v0.3 — live builder repair loop | complete, acceptance gate green |
 | v0.3.1 — extensibility addendum (knobs, cache, provenance) | complete |
+| v0.3.2 — adversarial review of the live loop | complete |
 | v0.3 and later | not started |
 
 Ready for a first rig campaign — see [docs/rig-campaign.md](docs/rig-campaign.md).
@@ -58,7 +59,7 @@ go run ./cmd/agentbench run -before-engine ./scripts/prepare-hipfire.sh -engines
 Run the live edit/test/repair loop, which writes `story.json`:
 
 ```bash
-go run ./cmd/agentbench run -lane builder-live -thermal steady -warmup 1 -repeats 3
+go run ./cmd/agentbench run -lane builder-live -thermal steady -repeats 1
 ```
 
 Replay the four-turn builder trajectory instead of a single turn:
@@ -176,7 +177,7 @@ story could reuse from the first:
 
 Slice records: [docs/v0.1.md](docs/v0.1.md), [docs/v0.2.md](docs/v0.2.md),
 [docs/v0.2.1.md](docs/v0.2.1.md), [docs/v0.2.2.md](docs/v0.2.2.md),
-[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md), [docs/v0.3.1.md](docs/v0.3.1.md).
+[docs/v0.2.3.md](docs/v0.2.3.md), [docs/v0.3.md](docs/v0.3.md), [docs/v0.3.1.md](docs/v0.3.1.md), [docs/v0.3.2.md](docs/v0.3.2.md).
 
 ## Toolchain
 

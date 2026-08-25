@@ -1,0 +1,47 @@
+{
+  "schema": "agentbench/engine/v1",
+  "name": "ar-medium",
+  "description": "Medium reasoning, for the v0.3 live lane. The no-think configs measured the mechanical floor and neither completed a patch; the medium-reasoning AR run was the one that reached a compiling tree, which is why the live loop exists. Kept as a separate config rather than editing the no-think ones, so the closed one-shot experiment stays reproducible. Per-turn ceilings come from the lane's turn_limits, not from sampling.max_tokens.",
+  "endpoint": "http://127.0.0.1:11435/v1",
+  "model": "qwen3.8:27b-fast",
+  "target_quant": "MQ4R",
+  "kv_mode": "Q8",
+  "speculation_mode": "off",
+  "telemetry_adapter": "hipfire",
+  "identity_probe": {
+    "path": "/health",
+    "require": {},
+    "record": {
+      "version": "engine_commit",
+      "model_hash": "model_hash",
+      "draft_model": "draft_hash"
+    },
+    "note": "STEP 0 OF docs/rig-campaign.md: identity_probe.require is deliberately empty. The rig fix that split AGENTBENCH_HEALTH_MODEL from the serve alias showed that /health reports a different model name than the name used to serve, so a require block guessed from the alias would abort every run. Inspect the real /health response, then put the value it actually reports here -- and, if the build exposes a field that distinguishes AR from DFlash, put that here too. That is what turns the row label from a claim into a checked fact."
+  },
+  "sampling": {
+    "temperature": 0,
+    "max_tokens": 32768,
+    "thinking": "medium"
+  },
+  "knobs": {
+    "target_model": "qwen3.8-27b",
+    "target_quant": "MQ4R",
+    "target_file": "",
+    "kv_dtype": "q8",
+    "prefill_speculation": "off",
+    "prompt_cache_mode": "",
+    "context_tokens": 32768,
+    "gpu": "0",
+    "gpu_env": {
+      "HIP_VISIBLE_DEVICES": "0"
+    },
+    "replica_id": "r0",
+    "speculation_method": "off"
+  },
+  "experiment": {
+    "family": "speculation-live",
+    "variant": "ar-medium",
+    "baseline": "ar-medium",
+    "notes": "Live builder lane at medium reasoning. Not comparable with the no-think one-shot rows."
+  }
+}

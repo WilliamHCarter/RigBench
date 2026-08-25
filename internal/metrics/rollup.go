@@ -31,6 +31,7 @@ func (s *Story) Rollup(records []*Record) {
 		TimeToFirstCompilingPatchMS: s.TimeToFirstCompilingPatchMS,
 		TimeToDiscriminatingGreenMS: s.TimeToDiscriminatingGreenMS,
 		TimeToHiddenGreenMS:         s.TimeToHiddenGreenMS,
+		FinalHiddenWallMS:           s.FinalHiddenWallMS,
 	}
 
 	var prefill, decode, decodeDerived, draft, verify, vttft, rttft, tau, accept []float64

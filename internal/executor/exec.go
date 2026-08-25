@@ -126,8 +126,11 @@ type Worktree struct {
 	fixture *config.Fixture
 }
 
-// Stage copies the frozen repository into dir, injects the hidden suite, and
-// commits the result so the baseline is a real git tree.
+// Stage copies the frozen repository into dir and commits it, so the baseline
+// is a real git tree.
+//
+// It does NOT inject the hidden suite. That is InjectHidden, called later and
+// exactly once per story, so a candidate's own build never compiles the oracle.
 //
 // withReference overlays the reference solution, which is how the fixture
 // verifies itself: the mutant controls and the gold path both start from here.

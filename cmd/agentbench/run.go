@@ -127,6 +127,12 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 		return "", fmt.Errorf("thermal must be cold, first-capture or steady, not %q; "+
 			"warm is never inferred from elapsed time", rf.thermal)
 	}
+	if rf.warmup > 0 && rf.lane != "" {
+		return "", fmt.Errorf("-warmup has no effect on a live lane: priming with the " +
+			"one-shot prompt measures a different workload, and priming with the live " +
+			"prompt would fill the cache with the story about to be measured. Drop " +
+			"-warmup; the preparation hook leaves the engine resident")
+	}
 	if rf.warmup > 0 && rf.thermal == "cold" {
 		return "", fmt.Errorf("a cold run cannot be preceded by %d warmup request(s); "+
 			"declare -thermal steady, or drop -warmup", rf.warmup)
@@ -135,6 +141,19 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	// to a cold state between repeats. Without that, repeats 2..N are warm rows
 	// wearing a cold label -- which is the failure this whole harness exists to
 	// prevent, so it is refused rather than warned about.
+	// Repeated live stories replay a byte-identical turn 0 against a server
+	// whose prompt cache is still warm from the previous repetition. Repetition
+	// 2 can then reuse repetition 1's entire prompt, and a three-repeat median
+	// becomes "one story plus two cached replays" -- which is a different
+	// measurement wearing the same name. Refused until something resets the
+	// cache between stories.
+	if rf.lane != "" && rf.repeats > 1 && rf.beforeEngine == "" && rf.preEngine == nil {
+		return "", fmt.Errorf("-lane %s with -repeats %d needs a way to reset the server's "+
+			"prompt cache between stories, or repetitions 2..%d replay a byte-identical "+
+			"turn 0 against a cache the previous repetition filled. Pass -before-engine "+
+			"to re-prepare between stories, or use -repeats 1 and inspect the trajectory",
+			rf.lane, rf.repeats, rf.repeats)
+	}
 	if rf.thermal == "cold" && rf.repeats > 1 && rf.beforeEngine == "" && rf.preEngine == nil {
 		return "", fmt.Errorf("-thermal cold with -repeats %d needs a way to return the "+
 			"server to a cold state between repetitions. Pass -before-engine, or use "+
@@ -286,7 +305,10 @@ func doRun(ctx context.Context, rf *runFlags) (string, error) {
 	// A cold measurement is only cold if the server was actually returned to a
 	// cold state, so repeated cold measurements are prepared individually and
 	// are never warmed.
-	preparePerRep := rf.thermal == "cold" && rf.repeats > 1
+	// A live lane re-prepares between repetitions for the same reason a cold run
+	// does: without it, repetition 2 is a cached replay of repetition 1 rather
+	// than an independent story.
+	preparePerRep := (rf.thermal == "cold" || rf.lane != "") && rf.repeats > 1
 	steps := schedule(scheduleParams{
 		Engines: len(engines), Repeats: rf.repeats, Warmups: rf.warmup,
 		PreparePerRepetition: preparePerRep,
@@ -569,7 +591,16 @@ func warmupPolicy(rf *runFlags, traj *config.Trajectory) string {
 			"each engine was prepared once, then measured %d times in a row; engines are "+
 				"never interleaved across repetitions", rf.repeats))
 	}
-	if traj != nil {
+	if rf.lane != "" {
+		parts = append(parts, fmt.Sprintf(
+			"live lane %s; a live lane is never primed with a benchmark prompt, so the "+
+				"engine's residency comes from the preparation hook alone", rf.lane))
+		if rf.repeats > 1 {
+			parts = append(parts, fmt.Sprintf(
+				"each of the %d repetitions was preceded by its own engine preparation, so "+
+					"repetitions are independent stories rather than cached replays", rf.repeats))
+		}
+	} else if traj != nil {
 		parts = append(parts, fmt.Sprintf(
 			"trajectory %s replayed over %d turns; in a cold run turn 0 is recorded cold "+
 				"and turns 1..%d as warm-resident, because the server is resident by then",

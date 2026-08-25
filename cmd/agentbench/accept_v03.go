@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/WilliamHCarter/RigBench/internal/config"
 	"github.com/WilliamHCarter/RigBench/internal/metrics"
 	"github.com/WilliamHCarter/RigBench/internal/mock"
+	"github.com/WilliamHCarter/RigBench/internal/prompt"
+	"github.com/WilliamHCarter/RigBench/internal/runner"
 )
 
 // v0.3 acceptance.
@@ -39,7 +42,7 @@ type liveExpectation struct {
 var liveAcceptance = []liveExpectation{
 	{
 		variant: mock.LiveConverges, lane: "builder-live",
-		hiddenGreen: true, stopReason: stopDiscriminatingGreen, minTurns: 2, maxTurns: 2,
+		hiddenGreen: true, stopReason: stopReadyForFinalReason, minTurns: 2, maxTurns: 2,
 		why: "turn 0 lands the new files and wires nothing -- which builds and passes the\n" +
 			"visible suite, exactly like the one-shot rig result -- and turn 1 repairs it\n" +
 			"once the host reports the discrimination failure",
@@ -111,6 +114,45 @@ var liveAcceptance = []liveExpectation{
 		},
 	},
 	{
+		variant: mock.LiveScopeThenRepair, lane: "builder-live",
+		hiddenGreen: true, stopReason: stopReadyForFinalReason, minTurns: 2, maxTurns: 2,
+		why: "turn 0 implements everything correctly AND edits one out-of-scope file, so\n" +
+			"build, visible and the discrimination gate all pass and only scope is red.\n" +
+			"A loop that stopped on discrimination alone would end this story as a failure\n" +
+			"with the host's own \"revert those files\" feedback computed and never sent",
+		check: func(s *metrics.Story) error {
+			if len(s.Turns) < 2 {
+				return fmt.Errorf("stopped after %d turn(s); the scope feedback was never sent",
+					len(s.Turns))
+			}
+			g := metrics.GateByName(s.Turns[0].Gates, "scope")
+			if g == nil || g.Result != metrics.GateFail {
+				return fmt.Errorf("turn 0's scope gate was %v, want fail", g)
+			}
+			if d := metrics.GateByName(s.Turns[0].Gates, "candidate_tests_discriminate"); d == nil ||
+				d.Result != metrics.GatePass {
+				return fmt.Errorf("turn 0's discrimination gate was %v, want pass -- the "+
+					"variant is not reproducing the scope-red/discrimination-green case", d)
+			}
+			return nil
+		},
+	},
+	{
+		variant: mock.LiveApplyFailThenRecover, lane: "builder-live",
+		hiddenGreen: true, stopReason: stopReadyForFinalReason, minTurns: 2, maxTurns: 2,
+		why: "a diff that does not apply must leave the tree untouched, must be reported\n" +
+			"as such, and must be repairable rather than terminal",
+		check: func(s *metrics.Story) error {
+			if s.FailedApplyAttempts != 1 {
+				return fmt.Errorf("failed applies = %d, want 1", s.FailedApplyAttempts)
+			}
+			if len(s.Turns) > 0 && s.Turns[0].PatchApplied {
+				return fmt.Errorf("a corrupted diff was recorded as applied")
+			}
+			return nil
+		},
+	},
+	{
 		variant: mock.LiveConverges, lane: "builder-repair-diagnostic",
 		hiddenGreen: true, stopReason: stopDoneReason, minTurns: 2, maxTurns: 3,
 		why: "the diagnostic lane returns the hidden suite's real failure after turn 0 and\n" +
@@ -126,10 +168,11 @@ var liveAcceptance = []liveExpectation{
 
 // Stop-reason constants mirrored here so the expectations read as data.
 const (
-	stopDiscriminatingGreen  = "visible rung and discrimination gate both green"
+	stopReadyForFinalReason  = "build, visible, scope and discrimination gate all green"
 	stopMaxTurnsReason       = "turn budget exhausted"
 	stopRepeatedNoDiffReason = "the model returned no diff twice in a row"
 	stopDoneReason           = "model declared done"
+	stopMaxWallReason        = "wall-clock budget exhausted"
 )
 
 func acceptV03(ctx context.Context, fixtureDir, layout, engines, root string, timeScale float64) error {
@@ -137,6 +180,15 @@ func acceptV03(ctx context.Context, fixtureDir, layout, engines, root string, ti
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("== wall-clock deadline ==\n%s\n",
+		indent("max_wall_seconds must cancel an in-flight request, not merely be checked\n"+
+			"between turns. A story with seconds left could otherwise start a request\n"+
+			"carrying its own 900-second timeout and overrun by most of an hour"))
+	if err := checkWallDeadline(ctx, fixtureDir, layout, root); err != nil {
+		return err
+	}
+	fmt.Println()
 
 	for _, exp := range liveAcceptance {
 		fmt.Printf("== %s on %s ==\n%s\n", exp.variant, exp.lane, indent(exp.why))
@@ -203,6 +255,9 @@ func acceptV03(ctx context.Context, fixtureDir, layout, engines, root string, ti
 				return fmt.Errorf("%s on %s: %w", exp.variant, exp.lane, err)
 			}
 		}
+		if err := checkStoryInvariants(s, runDir); err != nil {
+			return fmt.Errorf("%s on %s: %w", exp.variant, exp.lane, err)
+		}
 
 		leaked, err := hiddenLeakedInto(runDir)
 		if err != nil {
@@ -228,6 +283,68 @@ func acceptV03(ctx context.Context, fixtureDir, layout, engines, root string, ti
 			milestone(s.TimeToDiscriminatingGreenMS, s.TurnAtDiscriminatingGreen))
 	}
 	return nil
+}
+
+// checkStoryInvariants asserts the properties every story must satisfy,
+// whatever the variant did.
+func checkStoryInvariants(s *metrics.Story, runDir string) error {
+	// The clock identity. It used to fail because the final hidden evaluation
+	// was omitted from tool time, which let time_to_hidden_green exceed the
+	// total wall it is supposedly part of.
+	const eps = 0.5
+	if diff := s.TotalWallMS - (s.ModelWallMS + s.ToolWallMS); diff > eps || diff < -eps {
+		return fmt.Errorf("total_wall_ms %.1f != model %.1f + tool %.1f",
+			s.TotalWallMS, s.ModelWallMS, s.ToolWallMS)
+	}
+	if s.FinalHiddenWallMS <= 0 {
+		return fmt.Errorf("the final hidden evaluation was not timed")
+	}
+	if s.FinalHiddenWallMS > s.ToolWallMS+eps {
+		return fmt.Errorf("final hidden %.1f exceeds all tool time %.1f",
+			s.FinalHiddenWallMS, s.ToolWallMS)
+	}
+	if s.TimeToHiddenGreenMS != nil && *s.TimeToHiddenGreenMS > s.TotalWallMS+eps {
+		return fmt.Errorf("time_to_hidden_green %.1f exceeds total_wall %.1f",
+			*s.TimeToHiddenGreenMS, s.TotalWallMS)
+	}
+	if s.Task.TotalStoryWallMS != s.TotalWallMS {
+		return fmt.Errorf("task group disagrees with the story on total wall")
+	}
+
+	recs, err := loadRecords(runDir)
+	if err != nil {
+		return err
+	}
+	scored := 0
+	for _, r := range recs {
+		// Trajectory length must be recorded, not left at zero while the report
+		// prints it as prompt-growth telemetry.
+		if r.TurnCount != len(recs) {
+			return fmt.Errorf("turn %d records turn_count=%d, want %d",
+				r.TurnIndex, r.TurnCount, len(recs))
+		}
+		if r.TurnIndex > 0 && r.AppendedBytes <= 0 {
+			return fmt.Errorf("turn %d recorded appended_bytes=%d despite append-only growth",
+				r.TurnIndex, r.AppendedBytes)
+		}
+		if r.TurnIndex > 0 && r.Thermal == "cold" {
+			return fmt.Errorf("turn %d is labelled cold; only turn 0 can be", r.TurnIndex)
+		}
+		if r.Scored {
+			scored++
+		}
+	}
+	// Exactly one record carries the story's verdict. An intermediate repair
+	// turn is not an independent quality trial: counting one would report a
+	// green three-turn story as 33%% passing.
+	if scored != 1 {
+		return fmt.Errorf("%d records are marked scored, want exactly 1", scored)
+	}
+	return nil
+}
+
+func loadRecords(runDir string) ([]metrics.Record, error) {
+	return metrics.ReadRecords(filepath.Join(runDir, "request.jsonl"))
 }
 
 // hiddenMarkers are strings that appear only in the hidden suite. If one shows
@@ -278,4 +395,91 @@ func loadStories(path string) ([]*metrics.Story, error) {
 		return nil, err
 	}
 	return doc.Stories, nil
+}
+
+// checkWallDeadline proves max_wall_seconds is a deadline rather than a
+// between-turns check.
+//
+// The old implementation tested the budget only before starting a turn, so a
+// story with ten seconds left could begin a request carrying its own
+// 900-second client timeout and then run build and test commands carrying
+// theirs. A declared 3600-second budget could be exceeded by most of an hour,
+// and nothing in the acceptance suite exercised the claim.
+//
+// Driven directly rather than through doRun so the fixture does not need a
+// throwaway lane with a one-second budget.
+func checkWallDeadline(ctx context.Context, fixtureDir, layout, root string) error {
+	f, err := config.LoadFixture(fixtureDir)
+	if err != nil {
+		return err
+	}
+	lay, err := config.LoadLayout(layout)
+	if err != nil {
+		return err
+	}
+	e, err := config.LoadEngine("configs/engines/mock-ar.json")
+	if err != nil {
+		return err
+	}
+
+	stage, err := os.MkdirTemp("", "agentbench-wall-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	script, err := mock.BuildLiveScript(ctx, f, mock.LiveConverges, filepath.Join(stage, "live"))
+	if err != nil {
+		return err
+	}
+	// Deliberately slow: each request takes far longer than the budget.
+	srv := &mock.Server{
+		TimeScale: 4.0, ProfileFor: profileFromRequest,
+		Respond: func(i mock.RequestInfo) (string, string) { return script.Reply(i.AssistantTurns), "" },
+	}
+	ln, shutdown, err := srv.Listen("127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer shutdown(ctx)
+
+	const budget = 3
+	lane := &config.Lane{
+		AgentContractFile:           f.Lanes["builder-live"].AgentContractFile,
+		ObjectiveFile:               f.Lanes["builder-live"].ObjectiveFile,
+		MaxTurns:                    6,
+		MaxWallSeconds:              budget,
+		MaxToolOutputBytes:          16384,
+		StopWhenDiscriminatingGreen: true,
+	}
+
+	runDir := filepath.Join(root, "wall-deadline")
+	started := time.Now()
+	lr, err := runner.RunLive(ctx, runner.LiveOptions{
+		Options: runner.Options{
+			Fixture: f, Engine: e, Layout: lay, ContextPack: "base", Thermal: "cold",
+			RunID: "walldeadline", RunDir: runDir, WorkDir: filepath.Join(runDir, "work"),
+			Tokenizer:        prompt.Approx{},
+			EndpointOverride: fmt.Sprintf("http://%s/v1", ln.Addr()),
+		},
+		LaneName: "builder-live-wall-probe", Lane: lane,
+	})
+	if err != nil {
+		return fmt.Errorf("wall-deadline probe: %w", err)
+	}
+	elapsed := time.Since(started)
+
+	if lr.Story.StopReason != stopMaxWallReason {
+		return fmt.Errorf("wall-deadline probe stopped with %q, want %q",
+			lr.Story.StopReason, stopMaxWallReason)
+	}
+	// Generous ceiling: the final hidden evaluation is deliberately outside the
+	// agent budget, and it compiles a Zig test binary. What must not happen is
+	// the story running for a full request timeout past its budget.
+	if limit := time.Duration(budget)*time.Second + 90*time.Second; elapsed > limit {
+		return fmt.Errorf("wall-deadline probe ran %s against a %ds budget; the deadline "+
+			"is not being enforced", elapsed.Round(time.Second), budget)
+	}
+	fmt.Printf("  budget %ds, stopped after %s with %q\n",
+		budget, elapsed.Round(time.Second), lr.Story.StopReason)
+	return nil
 }
